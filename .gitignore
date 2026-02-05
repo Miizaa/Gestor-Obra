@@ -1,0 +1,7 @@
+*.db
+build/
+dist/
+*.spec
+*.exe
+.venv/
+export.txt
