@@ -3,15 +3,16 @@ import sys
 import os
 import ctypes
 import sqlite3
+import csv
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                                QTabWidget, QTableWidget, QTableWidgetItem, 
                                QHeaderView, QDateEdit, QComboBox, QMessageBox, 
                                QGroupBox, QGridLayout, QFrame, QSplitter, QAbstractItemView,
                                QDialog, QListWidget, QListWidgetItem, QMenu, QDoubleSpinBox,
-                               QSizePolicy, QTextEdit)
+                               QSizePolicy, QTextEdit, QFileDialog, QScrollArea)
 from PySide6.QtCore import Qt, QDate, QSettings, QLocale 
-from PySide6.QtGui import QIcon, QFont, QAction
+from PySide6.QtGui import QIcon, QFont, QAction, QColor
 
 # --- UTILITÁRIO DE CAMINHO ---
 def resource_path(relative_path):
@@ -89,7 +90,6 @@ class Database:
                 UNIQUE(obra_id, data)
             )
         """)
-        # ATUALIZADO: Tabela financeiro com nota_fiscal
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS financeiro (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,7 +116,6 @@ class Database:
         self.conn.commit()
 
     def migrate_tables(self):
-        # Migrações anteriores
         if not self.check_column_exists("funcionarios", "data_admissao"):
             self.cursor.execute("ALTER TABLE funcionarios ADD COLUMN data_admissao TEXT")
         if not self.check_column_exists("funcionarios", "telefone"):
@@ -136,12 +135,8 @@ class Database:
             self.cursor.execute("ALTER TABLE presenca ADD COLUMN tarde INTEGER DEFAULT 0")
             if self.check_column_exists("presenca", "presente"):
                 self.cursor.execute("UPDATE presenca SET manha=1, tarde=1 WHERE presente=1")
-        
-        # NOVA MIGRAÇÃO: Nota Fiscal no Financeiro
         if not self.check_column_exists("financeiro", "nota_fiscal"):
-            print("Migrando: Adicionando Nota Fiscal ao financeiro...")
             self.cursor.execute("ALTER TABLE financeiro ADD COLUMN nota_fiscal TEXT")
-            
         self.conn.commit()
 
     def check_column_exists(self, table_name, column_name):
@@ -293,7 +288,7 @@ class Database:
         self.cursor.execute("SELECT clima, atividades, ocorrencias FROM diario WHERE obra_id=? AND data=?", (obra_id, data))
         return self.cursor.fetchone()
 
-    # --- MÉTODOS FINANCEIRO (Atualizado com NF) ---
+    # --- MÉTODOS FINANCEIRO ---
     def add_financeiro(self, obra_id, data, tipo, valor, desc, nf):
         self.cursor.execute("INSERT INTO financeiro (obra_id, data, tipo, valor, descricao, nota_fiscal) VALUES (?,?,?,?,?,?)", (obra_id, data, tipo, valor, desc, nf))
         self.conn.commit()
@@ -323,6 +318,27 @@ class Database:
     def delete_epi(self, epi_id):
         try: self.cursor.execute("DELETE FROM epi WHERE id=?", (epi_id,)); self.conn.commit(); return True
         except: return False
+
+    # --- MÉTODOS PARA DASHBOARD ---
+    def get_dashboard_stats(self, obra_id, data):
+        self.cursor.execute("SELECT SUM(CASE WHEN tipo='entrada' THEN valor ELSE -valor END) FROM financeiro WHERE obra_id=?", (obra_id,))
+        saldo = self.cursor.fetchone()[0] or 0.0
+        
+        self.cursor.execute("""
+            SELECT COUNT(DISTINCT p.func_id) FROM presenca p
+            JOIN funcionarios f ON p.func_id = f.id
+            WHERE f.obra_id=? AND p.data=? AND (p.manha=1 OR p.tarde=1)
+        """, (obra_id, data))
+        presentes = self.cursor.fetchone()[0] or 0
+        
+        self.cursor.execute("SELECT item, quantidade, unidade FROM estoque WHERE obra_id=? AND quantidade < 5 ORDER BY quantidade ASC", (obra_id,))
+        baixo_estoque = self.cursor.fetchall()
+        
+        self.cursor.execute("SELECT clima FROM diario WHERE obra_id=? AND data=?", (obra_id, data))
+        clima_row = self.cursor.fetchone()
+        clima = clima_row[0] if clima_row else "Não registrado"
+        
+        return saldo, presentes, baixo_estoque, clima
 
 # --- 2. SELETOR DE OBRAS ---
 class ProjectSelector(QDialog):
@@ -429,15 +445,63 @@ class EditMaterialDialog(QDialog):
         self.db.update_material(self.item_id, self.in_item.text(), self.cb_cat.currentText(), self.cb_unit.currentText(), self.sp_qtd.value())
         QMessageBox.information(self, "Sucesso", "Item atualizado!"); self.accept()
 
-# --- 5. ABAS DE GESTÃO ---
+# --- 5. ABA: DASHBOARD ---
+class DashboardTab(QWidget):
+    def __init__(self, db, obra_id):
+        super().__init__()
+        self.db = db; self.obra_id = obra_id; self.setup_ui()
+    def setup_ui(self):
+        main_layout = QVBoxLayout()
+        # CABEÇALHO COM FUNDO ESCURO PARA DAR CONTRASTE AO TEXTO BRANCO
+        h_header_container = QWidget()
+        h_header_container.setStyleSheet("background-color: #333333; border-radius: 5px; padding: 5px;")
+        h_header = QHBoxLayout(h_header_container)
+        title = QLabel("📊 Visão Geral da Obra"); title.setStyleSheet("font-size: 22px; font-weight: bold; color: #FFFFFF;")
+        btn_refresh = QPushButton("🔄 Atualizar"); btn_refresh.setStyleSheet("background-color: #555; color: white; border: 1px solid #777; padding: 5px;")
+        btn_refresh.clicked.connect(self.load_data)
+        h_header.addWidget(title); h_header.addStretch(); h_header.addWidget(btn_refresh)
+        main_layout.addWidget(h_header_container)
+        
+        cards_layout = QHBoxLayout()
+        self.card_saldo = self.create_card("Saldo Caixa", "R$ 0,00", "#E3F2FD", "#1565C0")
+        self.card_func = self.create_card("Funcionários Hoje", "0", "#E8F5E9", "#2E7D32")
+        self.card_clima = self.create_card("Clima Hoje", "--", "#FFF3E0", "#EF6C00")
+        cards_layout.addWidget(self.card_saldo); cards_layout.addWidget(self.card_func); cards_layout.addWidget(self.card_clima)
+        main_layout.addLayout(cards_layout)
+        
+        main_layout.addWidget(QLabel("⚠️ Alerta de Estoque Baixo (Menos de 5 un):"))
+        self.list_alert = QListWidget()
+        # LISTA COM FUNDO ESCURO PARA EVITAR CLARIDADE EXCESSIVA
+        self.list_alert.setStyleSheet("border: 1px solid #555; background-color: #424242; color: #FFF;")
+        main_layout.addWidget(self.list_alert)
+        self.setLayout(main_layout); self.load_data()
+        
+    def create_card(self, title, val, bg, color):
+        frame = QFrame(); frame.setStyleSheet(f"background-color: {bg}; border-radius: 10px; border: 1px solid {color};")
+        l = QVBoxLayout(); l1 = QLabel(title); l1.setStyleSheet(f"color: {color}; font-size: 14px;")
+        l2 = QLabel(val); l2.setStyleSheet(f"color: {color}; font-size: 24px; font-weight: bold;"); l2.setObjectName("v")
+        l.addWidget(l1); l.addWidget(l2); frame.setLayout(l); return frame
+    def update_card(self, card, val):
+        card.findChild(QLabel, "v").setText(val)
+    def load_data(self):
+        s, p, b, c = self.db.get_dashboard_stats(self.obra_id, QDate.currentDate().toString("yyyy-MM-dd"))
+        self.update_card(self.card_saldo, f"R$ {s:.2f}")
+        self.update_card(self.card_func, str(p))
+        self.update_card(self.card_clima, c)
+        self.list_alert.clear()
+        if not b: self.list_alert.addItem("✅ Tudo certo!")
+        else: 
+            for i in b: self.list_alert.addItem(f"🔴 {i[0]}: {i[1]} {i[2]}")
 
+# --- 6. ABA: GESTÃO DE FUNCIONÁRIOS ---
 class EmployeeManager(QWidget):
     def __init__(self, db, obra_id):
         super().__init__(); self.db = db; self.obra_id = obra_id; self.eid = None
         layout = QVBoxLayout()
         gb = QGroupBox("Cadastro de Funcionário"); g = QGridLayout()
         self.n = QLineEdit(); self.f = QComboBox()
-        self.f.addItems(sorted(["Pedreiro", "Servente", "Mestre", "Encarregado", "Eletricista", "Pintor", "Encanador", "Estagiário", "Engenheiro", "Soldador"]))
+        # AJUSTADO: "Ajudante" no lugar de "Servente"
+        self.f.addItems(sorted(["Pedreiro", "Ajudante", "Mestre", "Encarregado", "Eletricista", "Pintor", "Encanador", "Estagiário", "Engenheiro", "Soldador"]))
         self.d_adm = QDateEdit(); self.d_adm.setCalendarPopup(True); self.d_adm.setDate(QDate.currentDate()); self.d_adm.setDisplayFormat("dd/MM/yyyy") 
         self.tel = QLineEdit(); self.cpf = QLineEdit(); self.rg = QLineEdit(); self.b = QLineEdit(); self.ag = QLineEdit(); self.c = QLineEdit()
         [w.setPlaceholderText(t) for w, t in zip([self.n, self.tel, self.cpf, self.rg, self.b, self.ag, self.c], ["Nome", "Telefone", "CPF", "RG", "Banco", "Agência", "Conta"])]
@@ -519,6 +583,7 @@ class EmployeeManager(QWidget):
             self.db.salvar_presenca(fid, d, manha, tarde)
         QMessageBox.information(self,"Ok","Salvo")
 
+# --- 7. ABA: ESTOQUE DA OBRA ---
 class StockControl(QWidget):
     def __init__(self, db, obra_id):
         super().__init__(); self.db = db; self.obra_id = obra_id; self.sid = None
@@ -529,8 +594,13 @@ class StockControl(QWidget):
         self.tb_s.setColumnHidden(0,True); self.tb_s.horizontalHeader().setSectionResizeMode(1,QHeaderView.Stretch)
         self.tb_s.setSelectionBehavior(QAbstractItemView.SelectRows); self.tb_s.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.tb_s.cellClicked.connect(self.sel)
+        
+        h_btns_stock = QHBoxLayout()
         btn_edit_item = QPushButton("✏️ Editar Item"); btn_edit_item.clicked.connect(self.edit_item)
-        ll.addWidget(self.tb_s); ll.addWidget(btn_edit_item)
+        btn_export_s = QPushButton("📤 Exp. Saldo"); btn_export_s.clicked.connect(self.export_saldo)
+        h_btns_stock.addWidget(btn_edit_item); h_btns_stock.addWidget(btn_export_s)
+        
+        ll.addWidget(self.tb_s); ll.addLayout(h_btns_stock)
         
         ll.addWidget(QLabel("📜 Histórico"))
         filter_layout = QHBoxLayout()
@@ -547,7 +617,12 @@ class StockControl(QWidget):
         filter_layout.addWidget(self.f_item); filter_layout.addWidget(self.f_cat)
         filter_layout.addWidget(self.f_origem); filter_layout.addWidget(self.f_tipo)
         filter_layout.addWidget(btn_filter)
-        ll.addLayout(filter_layout); ll.addWidget(btn_del)
+        ll.addLayout(filter_layout)
+        
+        h_hist_btns = QHBoxLayout()
+        btn_export_h = QPushButton("📤 Exp. Histórico"); btn_export_h.clicked.connect(self.export_historico)
+        h_hist_btns.addWidget(btn_del); h_hist_btns.addWidget(btn_export_h)
+        ll.addLayout(h_hist_btns)
         
         self.tb_h = QTableWidget(0,9) 
         self.tb_h.setHorizontalHeaderLabels(["ID","Data","Item","Categoria","Tipo","Qtd","Origem","Destino", "NF"])
@@ -630,6 +705,32 @@ class StockControl(QWidget):
             self.tb_h.setItem(r,5,QTableWidgetItem(f"{d[5]} {d[6]}"))
             self.tb_h.setItem(r,6,QTableWidgetItem(d[7] or "")); self.tb_h.setItem(r,7,QTableWidgetItem(d[8] or "")); self.tb_h.setItem(r,8,QTableWidgetItem(d[9] or ""))
 
+    # --- FUNÇÕES DE EXPORTAÇÃO ---
+    def export_csv(self, table, filename_prefix):
+        path, _ = QFileDialog.getSaveFileName(self, "Exportar para CSV", f"{filename_prefix}.csv", "CSV Files (*.csv)")
+        if not path: return
+        try:
+            with open(path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f, delimiter=';')
+                # Header
+                headers = [table.horizontalHeaderItem(i).text() for i in range(table.columnCount()) if not table.isColumnHidden(i)]
+                writer.writerow(headers)
+                # Rows
+                for r in range(table.rowCount()):
+                    row_data = []
+                    for c in range(table.columnCount()):
+                        if not table.isColumnHidden(c):
+                            item = table.item(r, c)
+                            row_data.append(item.text() if item else "")
+                    writer.writerow(row_data)
+            QMessageBox.information(self, "Sucesso", "Exportação concluída!")
+        except Exception as e:
+            QMessageBox.critical(self, "Erro", f"Erro ao exportar: {e}")
+
+    def export_saldo(self): self.export_csv(self.tb_s, "saldo_estoque")
+    def export_historico(self): self.export_csv(self.tb_h, "historico_estoque")
+
+# --- 8. ABA: RELATÓRIOS ---
 class ReportTab(QWidget):
     def __init__(self, db, obra_id):
         super().__init__(); self.db=db; self.obra_id=obra_id; l=QVBoxLayout()
@@ -637,8 +738,8 @@ class ReportTab(QWidget):
         d1.setDisplayFormat("dd/MM/yyyy"); d2.setDisplayFormat("dd/MM/yyyy")
         [d.setCalendarPopup(True) for d in [d1,d2]]
         b = QPushButton("Gerar Relatório"); b.clicked.connect(lambda: self.g(d1.date().toString("yyyy-MM-dd"),d2.date().toString("yyyy-MM-dd")))
-        b_copy = QPushButton("📋 Copiar Lista"); b_copy.setStyleSheet("background-color: #008CBA; color: white;"); b_copy.clicked.connect(self.copiar_area_transferencia)
-        h=QHBoxLayout(); h.addWidget(d1); h.addWidget(d2); h.addWidget(b); h.addWidget(b_copy); self.t=QTableWidget(0,10)
+        b_export = QPushButton("📤 Exportar Relatório"); b_export.clicked.connect(self.export_report)
+        h=QHBoxLayout(); h.addWidget(d1); h.addWidget(d2); h.addWidget(b); h.addWidget(b_export); self.t=QTableWidget(0,10)
         self.t.setHorizontalHeaderLabels(["Nome","Função","Admissão","Telefone","Dias","CPF","RG","Banco","Agência","Conta"])
         header = self.t.horizontalHeader(); header.setSectionResizeMode(QHeaderView.Interactive); header.setStretchLastSection(True); self.t.setColumnWidth(0, 200)
         l.addLayout(h); l.addWidget(self.t); self.setLayout(l)
@@ -657,17 +758,22 @@ class ReportTab(QWidget):
             self.t.setItem(r, 2, QTableWidgetItem(fmt)); self.t.setItem(r, 3, QTableWidgetItem(row[3])) 
             self.t.setItem(r, 4, QTableWidgetItem(str(row[4]))); self.t.setItem(r, 5, QTableWidgetItem(row[5])); self.t.setItem(r, 6, QTableWidgetItem(row[6]))
             self.t.setItem(r, 7, QTableWidgetItem(row[7])); self.t.setItem(r, 8, QTableWidgetItem(row[8])); self.t.setItem(r, 9, QTableWidgetItem(row[9]))
-    def copiar_area_transferencia(self):
-        lista_final = []; rows = self.t.rowCount()
-        for r in range(rows):
-            try:
-                dias_txt = self.t.item(r, 4).text()
-                if float(dias_txt) > 0: lista_final.append(f"{self.t.item(r, 0).text()} - {dias_txt} dias")
-            except: continue
-        if lista_final: QApplication.clipboard().setText("\n".join(lista_final)); QMessageBox.information(self, "Sucesso", "Copiado!")
-        else: QMessageBox.information(self, "Vazio", "Nenhum dado.")
+    
+    def export_report(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Exportar Relatório", "relatorio_presenca.csv", "CSV Files (*.csv)")
+        if not path: return
+        try:
+            with open(path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f, delimiter=';')
+                headers = [self.t.horizontalHeaderItem(i).text() for i in range(self.t.columnCount())]
+                writer.writerow(headers)
+                for r in range(self.t.rowCount()):
+                    row = [self.t.item(r, c).text() if self.t.item(r, c) else "" for c in range(self.t.columnCount())]
+                    writer.writerow(row)
+            QMessageBox.information(self, "Sucesso", "Relatório exportado!")
+        except Exception as e: QMessageBox.critical(self, "Erro", str(e))
 
-# --- 8. ABA: CALCULADORA DE MATERIAL (AGORA CORRETA) ---
+# --- 9. ABA: CALCULADORA DE MATERIAL ---
 class MaterialCalculator(QWidget): 
     def __init__(self):
         super().__init__()
@@ -736,7 +842,7 @@ class MaterialCalculator(QWidget):
             self.res_conc.setText(f"Vol: {vol_m3:.2f}m³ | Cim: {sacos_cimento:.1f} sc | Areia: {vol_areia:.2f}m³ | Brita: {vol_brita:.2f}m³")
         except: self.res_conc.setText("Erro: Verifique números.")
 
-# --- 9. ABA: DIÁRIO DE OBRA ---
+# --- 10. ABA: DIÁRIO DE OBRA ---
 class DiaryTab(QWidget):
     def __init__(self, db, obra_id):
         super().__init__()
@@ -768,7 +874,7 @@ class DiaryTab(QWidget):
         self.db.save_diario(self.obra_id, self.dt.date().toString("yyyy-MM-dd"), self.txt_clima.toPlainText(), self.txt_ativ.toPlainText(), self.txt_ocor.toPlainText())
         QMessageBox.information(self, "Sucesso", "Diário salvo!")
 
-# --- 10. ABA: FINANCEIRO (ATUALIZADA COM NF) ---
+# --- 11. ABA: FINANCEIRO (ATUALIZADA COM NF E EXPORT) ---
 class FinancialTab(QWidget):
     def __init__(self, db, obra_id):
         super().__init__(); self.db = db; self.obra_id = obra_id
@@ -776,23 +882,22 @@ class FinancialTab(QWidget):
         lw = QWidget(); ll = QVBoxLayout()
         self.lbl_saldo = QLabel("Saldo: R$ 0.00"); self.lbl_saldo.setStyleSheet("font-size: 18px; font-weight: bold;")
         ll.addWidget(self.lbl_saldo)
-        
-        # TABELA COM COLUNA NF (6 colunas)
         self.tb = QTableWidget(0, 6); self.tb.setHorizontalHeaderLabels(["ID", "Data", "Tipo", "Valor", "Descrição", "NF"])
         self.tb.setColumnHidden(0, True); self.tb.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.tb.setSelectionBehavior(QAbstractItemView.SelectRows)
         ll.addWidget(self.tb)
         
-        btn_del = QPushButton("🗑️ Excluir Lançamento"); btn_del.clicked.connect(self.delete_entry)
-        ll.addWidget(btn_del); lw.setLayout(ll)
+        h_btns = QHBoxLayout()
+        btn_del = QPushButton("🗑️ Excluir"); btn_del.clicked.connect(self.delete_entry)
+        btn_exp = QPushButton("📤 Exportar Extrato"); btn_exp.clicked.connect(self.export_data)
+        h_btns.addWidget(btn_del); h_btns.addWidget(btn_exp)
+        ll.addLayout(h_btns); lw.setLayout(ll)
         
         rw = QWidget(); rw.setMaximumWidth(300); rl = QVBoxLayout()
         gb = QGroupBox("Novo Lançamento"); gl = QGridLayout()
         self.dt = QDateEdit(); self.dt.setCalendarPopup(True); self.dt.setDate(QDate.currentDate()); self.dt.setDisplayFormat("dd/MM/yyyy")
         self.cb_tipo = QComboBox(); self.cb_tipo.addItems(["Saída (Gasto)", "Entrada (Recebimento)"])
         self.sp_valor = QDoubleSpinBox(); self.sp_valor.setRange(0, 1000000); self.sp_valor.setPrefix("R$ ")
-        
-        # NOVOS CAMPOS
         self.txt_nf = QLineEdit(); self.txt_nf.setPlaceholderText("Nota Fiscal")
         self.txt_desc = QLineEdit(); self.txt_desc.setPlaceholderText("Descrição (Ex: Cimento, Areia, Brita)")
         
@@ -800,7 +905,7 @@ class FinancialTab(QWidget):
         gl.addWidget(QLabel("Data:"),0,0); gl.addWidget(self.dt,0,1)
         gl.addWidget(QLabel("Tipo:"),1,0); gl.addWidget(self.cb_tipo,1,1)
         gl.addWidget(QLabel("Valor:"),2,0); gl.addWidget(self.sp_valor,2,1)
-        gl.addWidget(QLabel("NF:"),3,0); gl.addWidget(self.txt_nf,3,1) # Campo NF na grid
+        gl.addWidget(QLabel("NF:"),3,0); gl.addWidget(self.txt_nf,3,1)
         gl.addWidget(QLabel("Desc:"),4,0); gl.addWidget(self.txt_desc,4,1)
         gl.addWidget(btn_add,5,0,1,2); gb.setLayout(gl)
         rl.addWidget(gb); rl.addStretch(); rw.setLayout(rl)
@@ -808,7 +913,6 @@ class FinancialTab(QWidget):
 
     def add(self):
         tipo = "saida" if "Saída" in self.cb_tipo.currentText() else "entrada"
-        # Passando NF para o banco
         self.db.add_financeiro(self.obra_id, self.dt.date().toString("yyyy-MM-dd"), tipo, self.sp_valor.value(), self.txt_desc.text(), self.txt_nf.text())
         self.txt_desc.clear(); self.txt_nf.clear(); self.sp_valor.setValue(0); self.load_data()
 
@@ -838,8 +942,26 @@ class FinancialTab(QWidget):
         id_val = int(self.tb.item(rows[0].row(), 0).text())
         if QMessageBox.question(self, "Confirmar", "Apagar lançamento?", QMessageBox.Yes|QMessageBox.No) == QMessageBox.Yes:
             self.db.delete_financeiro(id_val); self.load_data()
+            
+    def export_data(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Exportar Extrato", "extrato_financeiro.csv", "CSV Files (*.csv)")
+        if not path: return
+        try:
+            with open(path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f, delimiter=';')
+                headers = [self.tb.horizontalHeaderItem(i).text() for i in range(self.tb.columnCount()) if not self.tb.isColumnHidden(i)]
+                writer.writerow(headers)
+                for r in range(self.tb.rowCount()):
+                    row = []
+                    for c in range(self.tb.columnCount()):
+                        if not self.tb.isColumnHidden(c):
+                            item = self.tb.item(r, c)
+                            row.append(item.text() if item else "")
+                    writer.writerow(row)
+            QMessageBox.information(self, "Sucesso", "Extrato exportado!")
+        except Exception as e: QMessageBox.critical(self, "Erro", str(e))
 
-# --- 11. ABA: CONTROLE DE EPI ---
+# --- 12. ABA: CONTROLE DE EPI ---
 class EPITab(QWidget):
     def __init__(self, db, obra_id):
         super().__init__(); self.db = db; self.obra_id = obra_id
@@ -892,7 +1014,55 @@ class EPITab(QWidget):
         if QMessageBox.question(self, "Confirmar", "Apagar registro?", QMessageBox.Yes|QMessageBox.No) == QMessageBox.Yes:
             self.db.delete_epi(id_val); self.load_data()
 
-# --- 12. JANELA PRINCIPAL (MAIN WINDOW) ---
+# --- 13. ABA: DASHBOARD ---
+class DashboardTab(QWidget):
+    def __init__(self, db, obra_id):
+        super().__init__()
+        self.db = db; self.obra_id = obra_id; self.setup_ui()
+    def setup_ui(self):
+        main_layout = QVBoxLayout()
+        # CABEÇALHO COM FUNDO ESCURO PARA DAR CONTRASTE AO TEXTO BRANCO
+        h_header_container = QWidget()
+        h_header_container.setStyleSheet("background-color: #333333; border-radius: 5px; padding: 5px;")
+        h_header = QHBoxLayout(h_header_container)
+        title = QLabel("📊 Visão Geral da Obra"); title.setStyleSheet("font-size: 22px; font-weight: bold; color: #FFFFFF;")
+        btn_refresh = QPushButton("🔄 Atualizar"); btn_refresh.setStyleSheet("background-color: #555; color: white; border: 1px solid #777; padding: 5px;")
+        btn_refresh.clicked.connect(self.load_data)
+        h_header.addWidget(title); h_header.addStretch(); h_header.addWidget(btn_refresh)
+        main_layout.addWidget(h_header_container)
+        
+        cards_layout = QHBoxLayout()
+        self.card_saldo = self.create_card("Saldo Caixa", "R$ 0,00", "#E3F2FD", "#1565C0")
+        self.card_func = self.create_card("Funcionários Hoje", "0", "#E8F5E9", "#2E7D32")
+        self.card_clima = self.create_card("Clima Hoje", "--", "#FFF3E0", "#EF6C00")
+        cards_layout.addWidget(self.card_saldo); cards_layout.addWidget(self.card_func); cards_layout.addWidget(self.card_clima)
+        main_layout.addLayout(cards_layout)
+        
+        main_layout.addWidget(QLabel("⚠️ Alerta de Estoque Baixo (Menos de 5 un):"))
+        self.list_alert = QListWidget()
+        # LISTA COM FUNDO ESCURO PARA EVITAR CLARIDADE EXCESSIVA
+        self.list_alert.setStyleSheet("border: 1px solid #555; background-color: #424242; color: #FFF;")
+        main_layout.addWidget(self.list_alert)
+        self.setLayout(main_layout); self.load_data()
+        
+    def create_card(self, title, val, bg, color):
+        frame = QFrame(); frame.setStyleSheet(f"background-color: {bg}; border-radius: 10px; border: 1px solid {color};")
+        l = QVBoxLayout(); l1 = QLabel(title); l1.setStyleSheet(f"color: {color}; font-size: 14px;")
+        l2 = QLabel(val); l2.setStyleSheet(f"color: {color}; font-size: 24px; font-weight: bold;"); l2.setObjectName("v")
+        l.addWidget(l1); l.addWidget(l2); frame.setLayout(l); return frame
+    def update_card(self, card, val):
+        card.findChild(QLabel, "v").setText(val)
+    def load_data(self):
+        s, p, b, c = self.db.get_dashboard_stats(self.obra_id, QDate.currentDate().toString("yyyy-MM-dd"))
+        self.update_card(self.card_saldo, f"R$ {s:.2f}")
+        self.update_card(self.card_func, str(p))
+        self.update_card(self.card_clima, c)
+        self.list_alert.clear()
+        if not b: self.list_alert.addItem("✅ Tudo certo!")
+        else: 
+            for i in b: self.list_alert.addItem(f"🔴 {i[0]}: {i[1]} {i[2]}")
+
+# --- 14. JANELA PRINCIPAL ---
 class ConstructionApp(QMainWindow):
     def __init__(self, db, obra_data):
         super().__init__()
@@ -923,17 +1093,23 @@ class ConstructionApp(QMainWindow):
         self.tab_diary = DiaryTab(self.db, self.obra_id)
         self.tab_finance = FinancialTab(self.db, self.obra_id)
         self.tab_epi = EPITab(self.db, self.obra_id)
+        self.tab_dashboard = DashboardTab(self.db, self.obra_id)
         
         # Adicionando ao TabWidget
+        self.tabs.addTab(self.tab_dashboard, "📊 Início")
         self.tabs.addTab(self.tab_calc, "🧮 Calculadora")
-        self.tabs.addTab(self.tab_diary, "📘 Diário de Obra")
-        self.tabs.addTab(self.tab_finance, "💰 Financeiro (Caixa)")
+        self.tabs.addTab(self.tab_diary, "📘 Diário")
+        self.tabs.addTab(self.tab_finance, "💰 Financeiro")
         self.tabs.addTab(self.tab_stock, "📦 Estoque")
-        self.tabs.addTab(self.tab_employees, "👷 Funcionários")
-        self.tabs.addTab(self.tab_epi, "🦺 Controle de EPI")
+        self.tabs.addTab(self.tab_employees, "👷 Equipe")
+        self.tabs.addTab(self.tab_epi, "🦺 EPIs")
         self.tabs.addTab(self.tab_reports, "📅 Relatórios")
         
+        self.tabs.currentChanged.connect(self.on_tab_change)
         self.setCentralWidget(self.tabs)
+
+    def on_tab_change(self, index):
+        if index == 0: self.tab_dashboard.load_data()
 
     def open_inactives(self):
         dialog = InactiveEmployeesDialog(self.db, self.obra_id); dialog.exec(); self.tab_employees.ld()
@@ -973,10 +1149,10 @@ class ConstructionApp(QMainWindow):
         self.tab_employees.load_table_state()
         self.tab_reports.load_table_state()
 
-# --- 13. EXECUÇÃO DO PROGRAMA ---
+# --- 15. EXECUÇÃO DO PROGRAMA ---
 if __name__ == "__main__":
     with contextlib.suppress(Exception):
-        myappid = 'miiza.gestor.obras.v26_3'
+        myappid = 'miiza.gestor.obras.v27_2'
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     
     app = QApplication(sys.argv)

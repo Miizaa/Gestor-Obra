@@ -1,6 +1,6 @@
 *.db
-build/
-dist/
+obra.build/
+obra.dist/
 *.spec
 *.exe
 .venv/
