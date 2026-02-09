@@ -1,7 +1,8 @@
-*.db
+.venv/
 obra.build/
 obra.dist/
-*.spec
+obra.onefile-build/
 *.exe
-.venv/
-export.txt
+*.db
+*.spec
+*.txt
