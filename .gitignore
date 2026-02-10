@@ -1,7 +1,7 @@
 .venv/
-obra.build/
-obra.dist/
-obra.onefile-build/
+GestorObras.build/
+GestorObras.dist/
+GestorObras.onefile-build/
 *.exe
 *.db
 *.spec
