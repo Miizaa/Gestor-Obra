@@ -4,7 +4,7 @@ import os
 import ctypes
 import sqlite3
 import csv
-import requests  # Necessário para o Auto-Updater
+import requests
 import subprocess
 import time
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -17,9 +17,9 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PySide6.QtCore import Qt, QDate, QSettings, QLocale, QThread, Signal
 from PySide6.QtGui import QIcon, QFont, QAction, QColor
 
-# --- CONFIGURAÇÕES DA VERSÃO (ATUALIZADA PARA O TESTE) ---
-APP_VERSION = "1.0.1"
-GITHUB_REPO = "Miizaa/Gestor-Obra"
+# --- CONFIGURAÇÕES DA VERSÃO ---
+APP_VERSION = "1.0.1" 
+GITHUB_REPO = "Miizaa/Gerenciamento-Obra" 
 
 # --- UTILITÁRIO DE CAMINHO ---
 def resource_path(relative_path):
@@ -75,8 +75,6 @@ class AutoUpdater(QDialog):
             if resp.status_code == 200:
                 data = resp.json()
                 tag_name = data.get("tag_name", "").replace("v", "")
-                
-                # Se a versão do GitHub for diferente da atual
                 if tag_name != APP_VERSION:
                     assets = data.get("assets", [])
                     for asset in assets:
@@ -89,6 +87,9 @@ class AutoUpdater(QDialog):
             return False
 
     def start_update(self):
+        if not getattr(sys, 'frozen', False):
+            return
+
         if QMessageBox.question(None, "Atualização", f"Nova versão {self.new_version} disponível.\nDeseja atualizar agora?", 
                                 QMessageBox.Yes|QMessageBox.No) == QMessageBox.Yes:
             self.show()
@@ -98,20 +99,38 @@ class AutoUpdater(QDialog):
             self.worker.start()
 
     def apply_update(self):
-        self.lbl.setText("Instalando...")
+        self.lbl.setText("Preparando para reiniciar...")
         nome_atual = os.path.basename(sys.executable)
+        
         bat_script = f"""
 @echo off
+title Atualizando Sistema...
+echo Aguardando o fechamento do programa...
 timeout /t 2 /nobreak > NUL
+
+:loop
 del "{nome_atual}"
+if exist "{nome_atual}" (
+    echo Arquivo ainda em uso. Tentando novamente em 1 segundo...
+    timeout /t 1 /nobreak > NUL
+    goto loop
+)
+
+echo Atualizando...
 ren "update_temp.exe" "{nome_atual}"
+echo Iniciando nova versao...
 start "" "{nome_atual}"
 del "%~f0"
         """
-        with open("updater.bat", "w") as f:
-            f.write(bat_script)
-        subprocess.Popen("updater.bat", shell=True)
-        QApplication.quit()
+        
+        try:
+            with open("updater.bat", "w") as f:
+                f.write(bat_script)
+            subprocess.Popen("updater.bat", shell=True)
+            QApplication.quit()
+            sys.exit(0)
+        except Exception as e:
+            QMessageBox.critical(self, "Erro", f"Falha ao iniciar atualização: {e}")
 
 # --- 1. BANCO DE DADOS ---
 class Database:
@@ -360,7 +379,6 @@ class Database:
             query += " AND (m.origem LIKE ? OR m.destino LIKE ?)"
             params.append(f"%{filtro_origem}%"); params.append(f"%{filtro_origem}%")
         if filtro_tipo != "Todos":
-            # Aqui ajustamos para buscar 'uso_interno' também se não filtrar
             if filtro_tipo == "Entrada":
                 query += " AND m.tipo = 'entrada'"
             elif filtro_tipo == "Saída":
@@ -373,7 +391,6 @@ class Database:
         self.cursor.execute(query, params); return self.cursor.fetchall()
     
     def movimentar_estoque(self, item_id, qtd, tipo, data, origem, destino, nf):
-        # Entrada soma, Saída e Uso Interno subtraem
         fator = 1 if tipo == "entrada" else -1
         self.cursor.execute("UPDATE estoque SET quantidade = quantidade + ? WHERE id = ?", (qtd * fator, item_id))
         self.cursor.execute("""
@@ -387,7 +404,6 @@ class Database:
         mov = self.cursor.fetchone()
         if not mov: return False
         item_id, qtd, tipo = mov
-        # Se foi entrada, reverte subtraindo. Se foi saída/uso interno, reverte somando.
         fator_reverso = -1 if tipo == 'entrada' else 1
         try:
             self.cursor.execute("UPDATE estoque SET quantidade = quantidade + ? WHERE id = ?", (qtd * fator_reverso, item_id))
@@ -463,6 +479,7 @@ class Database:
         self.cursor.execute("SELECT item, quantidade, unidade FROM estoque WHERE obra_id=? AND quantidade < 5 ORDER BY quantidade ASC", (obra_id,))
         baixo_estoque = self.cursor.fetchall()
         
+        # CORREÇÃO CRÍTICA AQUI: Trazendo 3 colunas para corresponder ao que o Dashboard pede
         self.cursor.execute("SELECT clima, atividades, ocorrencias FROM diario WHERE obra_id=? AND data=?", (obra_id, data))
         diario = self.cursor.fetchone() 
         
@@ -602,7 +619,7 @@ class EditMaterialDialog(QDialog):
         self.db.update_material(self.item_id, self.in_item.text(), self.cb_cat.currentText(), self.cb_unit.currentText(), self.sp_qtd.value())
         QMessageBox.information(self, "Sucesso", "Item atualizado!"); self.accept()
 
-# --- 6. ABA: DASHBOARD (REMODELADA) ---
+# --- 6. ABA: DASHBOARD (REMODELADA COM TEMA ESCURO) ---
 class DashboardTab(QWidget):
     def __init__(self, db, obra_id):
         super().__init__()
@@ -1339,7 +1356,7 @@ class ConstructionApp(QMainWindow):
 # --- 15. EXECUÇÃO DO PROGRAMA ---
 if __name__ == "__main__":
     with contextlib.suppress(Exception):
-        myappid = 'miiza.gestor.obras.v28_1'
+        myappid = 'miiza.gestor.obras.v30_2'
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     
     app = QApplication(sys.argv)
