@@ -4,21 +4,112 @@ import os
 import ctypes
 import sqlite3
 import csv
+import requests  # Necessário para o Auto-Updater
+import subprocess
+import time
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                                QTabWidget, QTableWidget, QTableWidgetItem, 
                                QHeaderView, QDateEdit, QComboBox, QMessageBox, 
                                QGroupBox, QGridLayout, QFrame, QSplitter, QAbstractItemView,
                                QDialog, QListWidget, QListWidgetItem, QMenu, QDoubleSpinBox,
-                               QSizePolicy, QTextEdit, QFileDialog, QScrollArea, QInputDialog) # Adicionado QInputDialog
-from PySide6.QtCore import Qt, QDate, QSettings, QLocale 
+                               QSizePolicy, QTextEdit, QFileDialog, QScrollArea, QInputDialog, QProgressBar)
+from PySide6.QtCore import Qt, QDate, QSettings, QLocale, QThread, Signal
 from PySide6.QtGui import QIcon, QFont, QAction, QColor
+
+# --- CONFIGURAÇÕES DA VERSÃO ---
+APP_VERSION = "1.0.0" 
+GITHUB_REPO = "Miizaa/Gestor-Obra" # EX: "Miizaa/GestorObras"
 
 # --- UTILITÁRIO DE CAMINHO ---
 def resource_path(relative_path):
     try: base_path = sys._MEIPASS
     except Exception: base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
+
+# --- WORKER DE ATUALIZAÇÃO ---
+class UpdateWorker(QThread):
+    progress = Signal(int)
+    finished = Signal()
+    error = Signal(str)
+
+    def __init__(self, download_url, save_path):
+        super().__init__()
+        self.url = download_url
+        self.path = save_path
+
+    def run(self):
+        try:
+            response = requests.get(self.url, stream=True)
+            total_size = int(response.headers.get('content-length', 0))
+            block_size = 1024
+            wrote = 0
+            with open(self.path, 'wb') as f:
+                for data in response.iter_content(block_size):
+                    wrote += len(data)
+                    f.write(data)
+                    if total_size > 0:
+                        self.progress.emit(int(wrote / total_size * 100))
+            self.finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))
+
+class AutoUpdater(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Atualização Disponível")
+        self.resize(300, 150)
+        self.layout = QVBoxLayout()
+        self.lbl = QLabel("Baixando nova versão...")
+        self.bar = QProgressBar()
+        self.layout.addWidget(self.lbl)
+        self.layout.addWidget(self.bar)
+        self.setLayout(self.layout)
+        self.download_url = ""
+        self.new_version = ""
+
+    def check_updates(self):
+        try:
+            api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            resp = requests.get(api_url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                tag_name = data.get("tag_name", "").replace("v", "")
+                if tag_name != APP_VERSION:
+                    assets = data.get("assets", [])
+                    for asset in assets:
+                        if asset["name"].endswith(".exe"):
+                            self.download_url = asset["browser_download_url"]
+                            self.new_version = tag_name
+                            return True
+            return False
+        except:
+            return False
+
+    def start_update(self):
+        if QMessageBox.question(None, "Atualização", f"Nova versão {self.new_version} disponível.\nDeseja atualizar agora?", 
+                                QMessageBox.Yes|QMessageBox.No) == QMessageBox.Yes:
+            self.show()
+            self.worker = UpdateWorker(self.download_url, "update_temp.exe")
+            self.worker.progress.connect(self.bar.setValue)
+            self.worker.finished.connect(self.apply_update)
+            self.worker.start()
+
+    def apply_update(self):
+        self.lbl.setText("Instalando...")
+        nome_atual = os.path.basename(sys.executable)
+        bat_script = f"""
+@echo off
+timeout /t 2 /nobreak > NUL
+del "{nome_atual}"
+ren "update_temp.exe" "{nome_atual}"
+start "" "{nome_atual}"
+del "%~f0"
+        """
+        with open("updater.bat", "w") as f:
+            f.write(bat_script)
+        subprocess.Popen("updater.bat", shell=True)
+        QApplication.quit()
 
 # --- 1. BANCO DE DADOS ---
 class Database:
@@ -45,13 +136,12 @@ class Database:
                 FOREIGN KEY(obra_id) REFERENCES obras(id)
             )
         """)
-        # NOVA TABELA: HISTÓRICO DE STATUS (V28)
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS historico_status (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 func_id INTEGER,
                 data TEXT,
-                novo_status INTEGER, -- 1=Ativo, 0=Inativo
+                novo_status INTEGER, 
                 motivo TEXT,
                 FOREIGN KEY(func_id) REFERENCES funcionarios(id)
             )
@@ -182,7 +272,6 @@ class Database:
             self.conn.commit(); return True
         except: return False
 
-    # ATUALIZADO: toggle_ativo agora registra no histórico
     def toggle_ativo_funcionario(self, fid, status, motivo=""):
         data_hoje = QDate.currentDate().toString("yyyy-MM-dd")
         try:
@@ -193,7 +282,6 @@ class Database:
             return True
         except: return False
 
-    # NOVO: Busca histórico
     def get_historico_funcionario(self, fid):
         self.cursor.execute("SELECT data, novo_status, motivo FROM historico_status WHERE func_id=? ORDER BY data DESC, id DESC", (fid,))
         return self.cursor.fetchall()
@@ -352,16 +440,23 @@ class Database:
             JOIN funcionarios f ON p.func_id = f.id
             WHERE f.obra_id=? AND p.data=? AND (p.manha=1 OR p.tarde=1)
         """, (obra_id, data))
-        presentes = self.cursor.fetchone()[0] or 0
+        presentes_count = self.cursor.fetchone()[0] or 0
+        
+        self.cursor.execute("""
+            SELECT DISTINCT f.nome FROM presenca p
+            JOIN funcionarios f ON p.func_id = f.id
+            WHERE f.obra_id=? AND p.data=? AND (p.manha=1 OR p.tarde=1)
+            ORDER BY f.nome ASC
+        """, (obra_id, data))
+        lista_presentes = [r[0] for r in self.cursor.fetchall()]
         
         self.cursor.execute("SELECT item, quantidade, unidade FROM estoque WHERE obra_id=? AND quantidade < 5 ORDER BY quantidade ASC", (obra_id,))
         baixo_estoque = self.cursor.fetchall()
         
-        self.cursor.execute("SELECT clima FROM diario WHERE obra_id=? AND data=?", (obra_id, data))
-        clima_row = self.cursor.fetchone()
-        clima = clima_row[0] if clima_row else "Não registrado"
+        self.cursor.execute("SELECT clima, atividades, ocorrencias FROM diario WHERE obra_id=? AND data=?", (obra_id, data))
+        diario = self.cursor.fetchone() 
         
-        return saldo, presentes, baixo_estoque, clima
+        return saldo, presentes_count, baixo_estoque, diario, lista_presentes
 
 # --- 2. SELETOR DE OBRAS ---
 class ProjectSelector(QDialog):
@@ -407,7 +502,7 @@ class ProjectSelector(QDialog):
         if current_item: self.selected_obra = current_item.data(Qt.UserRole); self.accept()
         else: QMessageBox.warning(self, "Aviso", "Selecione uma obra.")
 
-# --- 3. DIÁLOGO DE HISTÓRICO (NOVO) ---
+# --- 3. DIÁLOGO DE HISTÓRICO ---
 class EmployeeHistoryDialog(QDialog):
     def __init__(self, db, func_id, func_nome):
         super().__init__()
@@ -428,7 +523,6 @@ class EmployeeHistoryDialog(QDialog):
             try: fmt = QDate.fromString(row[0], "yyyy-MM-dd").toString("dd/MM/yyyy")
             except: fmt = row[0]
             self.tb.setItem(r, 0, QTableWidgetItem(fmt))
-            
             st_text = "🟢 Ativo" if row[1] == 1 else "🔴 Inativo"
             self.tb.setItem(r, 1, QTableWidgetItem(st_text))
             self.tb.setItem(r, 2, QTableWidgetItem(row[2] or ""))
@@ -461,7 +555,6 @@ class InactiveEmployeesDialog(QDialog):
         if not rows: QMessageBox.warning(self, "Aviso", "Selecione um funcionário."); return
         fid = int(self.tb.item(rows[0].row(), 0).text()); nome = self.tb.item(rows[0].row(), 1).text()
         
-        # Pergunta motivo da reativação (opcional)
         motivo, ok = QInputDialog.getText(self, "Reativar", f"Motivo da reativação de {nome} (opcional):")
         if ok:
             self.db.toggle_ativo_funcionario(fid, 1, motivo)
@@ -504,9 +597,9 @@ class DashboardTab(QWidget):
     def __init__(self, db, obra_id):
         super().__init__()
         self.db = db; self.obra_id = obra_id; self.setup_ui()
+    
     def setup_ui(self):
         main_layout = QVBoxLayout()
-        # CABEÇALHO COM FUNDO ESCURO
         h_header_container = QWidget()
         h_header_container.setStyleSheet("background-color: #333333; border-radius: 5px; padding: 5px;")
         h_header = QHBoxLayout(h_header_container)
@@ -518,16 +611,39 @@ class DashboardTab(QWidget):
         
         cards_layout = QHBoxLayout()
         self.card_saldo = self.create_card("Saldo Caixa", "R$ 0,00", "#E3F2FD", "#1565C0")
-        self.card_func = self.create_card("Funcionários Hoje", "0", "#E8F5E9", "#2E7D32")
-        self.card_clima = self.create_card("Clima Hoje", "--", "#FFF3E0", "#EF6C00")
+        self.card_func = self.create_card("Presentes Hoje", "0", "#E8F5E9", "#2E7D32")
+        self.card_clima = self.create_card("Clima", "--", "#FFF3E0", "#EF6C00")
         cards_layout.addWidget(self.card_saldo); cards_layout.addWidget(self.card_func); cards_layout.addWidget(self.card_clima)
         main_layout.addLayout(cards_layout)
         
-        main_layout.addWidget(QLabel("⚠️ Alerta de Estoque Baixo (Menos de 5 un):"))
+        h_lists = QHBoxLayout()
+        gb_emp = QGroupBox("👷 Funcionários Presentes")
+        self.list_presentes = QListWidget()
+        self.list_presentes.setStyleSheet("border: 1px solid #555; background-color: #424242; color: #FFF;") 
+        v_emp = QVBoxLayout(); v_emp.addWidget(self.list_presentes); gb_emp.setLayout(v_emp)
+        
+        gb_stock = QGroupBox("⚠️ Estoque Baixo")
         self.list_alert = QListWidget()
-        # LISTA COM FUNDO ESCURO PARA EVITAR CLARIDADE EXCESSIVA
-        self.list_alert.setStyleSheet("border: 1px solid #555; background-color: #424242; color: #FFF;")
-        main_layout.addWidget(self.list_alert)
+        self.list_alert.setStyleSheet("border: 1px solid #555; background-color: #424242; color: #FFEB3B;") 
+        v_stock = QVBoxLayout(); v_stock.addWidget(self.list_alert); gb_stock.setLayout(v_stock)
+        
+        h_lists.addWidget(gb_emp); h_lists.addWidget(gb_stock)
+        main_layout.addLayout(h_lists)
+        
+        h_diary = QHBoxLayout()
+        gb_ativ = QGroupBox("🔨 Atividades do Dia")
+        self.txt_ativ = QTextEdit(); self.txt_ativ.setReadOnly(True)
+        self.txt_ativ.setStyleSheet("border: 1px solid #555; background-color: #424242; color: #FFF;") 
+        v_ativ = QVBoxLayout(); v_ativ.addWidget(self.txt_ativ); gb_ativ.setLayout(v_ativ)
+        
+        gb_ocor = QGroupBox("⚠️ Ocorrências / Imprevistos")
+        self.txt_ocor = QTextEdit(); self.txt_ocor.setReadOnly(True)
+        self.txt_ocor.setStyleSheet("border: 1px solid #555; background-color: #424242; color: #FFF;") 
+        v_ocor = QVBoxLayout(); v_ocor.addWidget(self.txt_ocor); gb_ocor.setLayout(v_ocor)
+        
+        h_diary.addWidget(gb_ativ); h_diary.addWidget(gb_ocor)
+        main_layout.addLayout(h_diary)
+        
         self.setLayout(main_layout); self.load_data()
         
     def create_card(self, title, val, bg, color):
@@ -535,17 +651,35 @@ class DashboardTab(QWidget):
         l = QVBoxLayout(); l1 = QLabel(title); l1.setStyleSheet(f"color: {color}; font-size: 14px;")
         l2 = QLabel(val); l2.setStyleSheet(f"color: {color}; font-size: 24px; font-weight: bold;"); l2.setObjectName("v")
         l.addWidget(l1); l.addWidget(l2); frame.setLayout(l); return frame
+    
     def update_card(self, card, val):
         card.findChild(QLabel, "v").setText(val)
+    
     def load_data(self):
-        s, p, b, c = self.db.get_dashboard_stats(self.obra_id, QDate.currentDate().toString("yyyy-MM-dd"))
+        s, p_count, b_stock, diario, p_names = self.db.get_dashboard_stats(self.obra_id, QDate.currentDate().toString("yyyy-MM-dd"))
         self.update_card(self.card_saldo, f"R$ {s:.2f}")
-        self.update_card(self.card_func, str(p))
-        self.update_card(self.card_clima, c)
+        self.update_card(self.card_func, str(p_count))
+        
+        if diario:
+            self.update_card(self.card_clima, diario[0] if diario[0] else "--")
+            self.txt_ativ.setPlainText(diario[1] if diario[1] else "Nenhuma atividade registrada.")
+            self.txt_ocor.setPlainText(diario[2] if diario[2] else "Nenhuma ocorrência.")
+        else:
+            self.update_card(self.card_clima, "--")
+            self.txt_ativ.setPlainText("Diário de hoje não criado.")
+            self.txt_ocor.setPlainText("")
+
+        self.list_presentes.clear()
+        if not p_names:
+            self.list_presentes.addItem("Ninguém marcou presença hoje.")
+        else:
+            for nome in p_names: self.list_presentes.addItem(f"👤 {nome}")
+
         self.list_alert.clear()
-        if not b: self.list_alert.addItem("✅ Tudo certo!")
+        if not b_stock:
+            self.list_alert.addItem("✅ Tudo certo! Estoque OK.")
         else: 
-            for i in b: self.list_alert.addItem(f"🔴 {i[0]}: {i[1]} {i[2]}")
+            for i in b_stock: self.list_alert.addItem(f"🔴 {i[0]}: {i[1]} {i[2]}")
 
 # --- 7. ABA: GESTÃO DE FUNCIONÁRIOS ---
 class EmployeeManager(QWidget):
@@ -554,7 +688,6 @@ class EmployeeManager(QWidget):
         layout = QVBoxLayout()
         gb = QGroupBox("Cadastro de Funcionário"); g = QGridLayout()
         self.n = QLineEdit(); self.f = QComboBox()
-        # "Ajudante" no lugar de "Servente"
         self.f.addItems(sorted(["Pedreiro", "Ajudante", "Mestre", "Encarregado", "Eletricista", "Pintor", "Encanador", "Estagiário", "Engenheiro", "Soldador"]))
         self.d_adm = QDateEdit(); self.d_adm.setCalendarPopup(True); self.d_adm.setDate(QDate.currentDate()); self.d_adm.setDisplayFormat("dd/MM/yyyy") 
         self.tel = QLineEdit(); self.cpf = QLineEdit(); self.rg = QLineEdit(); self.b = QLineEdit(); self.ag = QLineEdit(); self.c = QLineEdit()
@@ -563,10 +696,7 @@ class EmployeeManager(QWidget):
         bt_clear = QPushButton("Limpar"); bt_clear.clicked.connect(self.rst)
         self.bt_del = QPushButton("❌ Desativar"); self.bt_del.setStyleSheet("background-color: #F44336; color: white;")
         self.bt_del.clicked.connect(self.desativar); self.bt_del.setVisible(False)
-        
-        # Botão de Histórico
         btn_hist = QPushButton("📜 Ver Histórico"); btn_hist.clicked.connect(self.show_history)
-        
         g.addWidget(QLabel("Nome:"),0,0); g.addWidget(self.n,0,1); g.addWidget(self.f,0,2)
         g.addWidget(QLabel("Doc:"),1,0); g.addWidget(self.cpf,1,1); g.addWidget(self.rg,1,2)
         g.addWidget(QLabel("Admissão:"),1,3); g.addWidget(self.d_adm,1,4); g.addWidget(QLabel("Telefone:"),0,3); g.addWidget(self.tel,0,4) 
@@ -574,13 +704,11 @@ class EmployeeManager(QWidget):
         hbox_btns = QHBoxLayout(); hbox_btns.addWidget(btn_hist); hbox_btns.addWidget(bt_clear); hbox_btns.addWidget(self.bt_del); hbox_btns.addWidget(bt_save)
         g.addLayout(hbox_btns, 3, 0, 1, 5); gb.setLayout(g)
         self.dt = QDateEdit(); self.dt.setCalendarPopup(True); self.dt.setDate(QDate.currentDate()); self.dt.dateChanged.connect(self.ld); self.dt.setDisplayFormat("dd/MM/yyyy")
-        
         colunas = ["ID", "Nome", "Função", "Admissão", "Telefone", "CPF", "RG", "Banco", "Agência", "Conta", "Manhã", "Tarde"]
         self.tb = QTableWidget(0, len(colunas)); self.tb.setHorizontalHeaderLabels(colunas); self.tb.setColumnHidden(0, True)
         self.tb.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive); self.tb.cellDoubleClicked.connect(self.ed)
         self.tb.setSelectionBehavior(QAbstractItemView.SelectRows); self.tb.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.tb.setColumnWidth(10, 30); self.tb.setColumnWidth(11, 30)
-        
+        self.tb.setColumnWidth(10, 60); self.tb.setColumnWidth(11, 60)
         bp = QPushButton("💾 Salvar Presença"); bp.setStyleSheet("background-color:#4CAF50;color:white;font-weight:bold"); bp.clicked.connect(self.svp)
         layout.addWidget(gb); layout.addWidget(self.dt); layout.addWidget(self.tb); layout.addWidget(bp); self.setLayout(layout); self.ld()
 
@@ -606,7 +734,6 @@ class EmployeeManager(QWidget):
 
     def desativar(self):
         if not self.eid: return
-        # Pergunta motivo
         motivo, ok = QInputDialog.getText(self, "Desativar", "Motivo da inatividade (Opcional):")
         if ok:
             self.db.toggle_ativo_funcionario(self.eid, 0, motivo)
@@ -617,10 +744,8 @@ class EmployeeManager(QWidget):
         rows = self.tb.selectionModel().selectedRows()
         if not rows and not self.eid: 
             QMessageBox.warning(self, "Aviso", "Selecione um funcionário na tabela ou carregue um."); return
-        
         fid = self.eid if self.eid else int(self.tb.item(rows[0].row(), 0).text())
         fname = self.n.text() if self.eid else self.tb.item(rows[0].row(), 1).text()
-        
         dlg = EmployeeHistoryDialog(self.db, fid, fname)
         dlg.exec()
 
@@ -785,10 +910,8 @@ class StockControl(QWidget):
         try:
             with open(path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f, delimiter=';')
-                # Header
                 headers = [table.horizontalHeaderItem(i).text() for i in range(table.columnCount()) if not table.isColumnHidden(i)]
                 writer.writerow(headers)
-                # Rows
                 for r in range(table.rowCount()):
                     row_data = []
                     for c in range(table.columnCount()):
@@ -915,7 +1038,7 @@ class MaterialCalculator(QWidget):
             self.res_conc.setText(f"Vol: {vol_m3:.2f}m³ | Cim: {sacos_cimento:.1f} sc | Areia: {vol_areia:.2f}m³ | Brita: {vol_brita:.2f}m³")
         except: self.res_conc.setText("Erro: Verifique números.")
 
-# --- 11. ABA: DIÁRIO DE OBRA ---
+# --- 11. ABA: DIÁRIO DE OBRA (AGORA INCLUÍDA) ---
 class DiaryTab(QWidget):
     def __init__(self, db, obra_id):
         super().__init__()
@@ -1096,6 +1219,11 @@ class ConstructionApp(QMainWindow):
         except: pass
         self.resize(1200, 800); self.setup_ui(); self.status = self.statusBar(); self.update_footer()
         self.load_window_settings()
+        
+        # CHECA ATUALIZAÇÃO AO INICIAR
+        self.updater = AutoUpdater(self)
+        if self.updater.check_updates():
+            self.updater.start_update()
 
     def setup_ui(self):
         self.setWindowTitle(f"Gestor de Obras - {self.obra_nome}")
@@ -1111,14 +1239,14 @@ class ConstructionApp(QMainWindow):
         self.tabs = QTabWidget()
         
         # Instanciando as abas (TODAS DEFINIDAS ANTES)
+        self.tab_dashboard = DashboardTab(self.db, self.obra_id)
         self.tab_calc = MaterialCalculator()
         self.tab_stock = StockControl(self.db, self.obra_id)
         self.tab_employees = EmployeeManager(self.db, self.obra_id)
         self.tab_reports = ReportTab(self.db, self.obra_id)
-        self.tab_diary = DiaryTab(self.db, self.obra_id)
+        self.tab_diary = DiaryTab(self.db, self.obra_id) # AGORA ESTÁ AQUI
         self.tab_finance = FinancialTab(self.db, self.obra_id)
         self.tab_epi = EPITab(self.db, self.obra_id)
-        self.tab_dashboard = DashboardTab(self.db, self.obra_id)
         
         # Adicionando ao TabWidget
         self.tabs.addTab(self.tab_dashboard, "📊 Início")
@@ -1177,7 +1305,7 @@ class ConstructionApp(QMainWindow):
 # --- 15. EXECUÇÃO DO PROGRAMA ---
 if __name__ == "__main__":
     with contextlib.suppress(Exception):
-        myappid = 'miiza.gestor.obras.v28_0'
+        myappid = 'miiza.gestor.obras.v29_1'
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     
     app = QApplication(sys.argv)
