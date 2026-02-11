@@ -177,6 +177,7 @@ class Database:
                 UNIQUE(func_id, data)
             )
         """)
+        # ATUALIZADO: Estoque com alerta_qtd e alerta_on
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS estoque (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -185,6 +186,8 @@ class Database:
                 categoria TEXT, 
                 unidade TEXT NOT NULL, 
                 quantidade REAL DEFAULT 0,
+                alerta_qtd REAL DEFAULT 5.0,
+                alerta_on INTEGER DEFAULT 1,
                 FOREIGN KEY(obra_id) REFERENCES obras(id)
             )
         """)
@@ -259,6 +262,13 @@ class Database:
                 self.cursor.execute("UPDATE presenca SET manha=1, tarde=1 WHERE presente=1")
         if not self.check_column_exists("financeiro", "nota_fiscal"):
             self.cursor.execute("ALTER TABLE financeiro ADD COLUMN nota_fiscal TEXT")
+        
+        # MIGRAÇÃO ALERTA ESTOQUE
+        if not self.check_column_exists("estoque", "alerta_qtd"):
+            self.cursor.execute("ALTER TABLE estoque ADD COLUMN alerta_qtd REAL DEFAULT 5.0")
+        if not self.check_column_exists("estoque", "alerta_on"):
+            self.cursor.execute("ALTER TABLE estoque ADD COLUMN alerta_on INTEGER DEFAULT 1")
+            
         self.conn.commit()
 
     def check_column_exists(self, table_name, column_name):
@@ -352,20 +362,30 @@ class Database:
         return self.cursor.fetchall()
 
     # --- MÉTODOS DE ESTOQUE ---
-    def add_material(self, obra_id, item, categoria, unidade):
-        self.cursor.execute("INSERT INTO estoque (obra_id, item, categoria, unidade, quantidade) VALUES (?, ?, ?, ?, 0)", (obra_id, item, categoria, unidade))
+    def add_material(self, obra_id, item, categoria, unidade, alerta_qtd=5.0, alerta_on=1):
+        self.cursor.execute("""
+            INSERT INTO estoque (obra_id, item, categoria, unidade, quantidade, alerta_qtd, alerta_on) 
+            VALUES (?, ?, ?, ?, 0, ?, ?)
+        """, (obra_id, item, categoria, unidade, alerta_qtd, alerta_on))
         self.conn.commit()
-    def update_material(self, item_id, item, categoria, unidade, quantidade):
-        self.cursor.execute("UPDATE estoque SET item=?, categoria=?, unidade=?, quantidade=? WHERE id=?", (item, categoria, unidade, quantidade, item_id))
+
+    def update_material(self, item_id, item, categoria, unidade, quantidade, alerta_qtd, alerta_on):
+        self.cursor.execute("""
+            UPDATE estoque SET item=?, categoria=?, unidade=?, quantidade=?, alerta_qtd=?, alerta_on=? WHERE id=?
+        """, (item, categoria, unidade, quantidade, alerta_qtd, alerta_on, item_id))
         self.conn.commit()
+
     def get_estoque(self, obra_id):
         cols = "id, obra_id, item, categoria, unidade, quantidade"
         self.cursor.execute(f"SELECT {cols} FROM estoque WHERE obra_id=? ORDER BY item ASC", (obra_id,))
         return self.cursor.fetchall()
+    
     def get_material_by_id(self, item_id):
-        cols = "id, obra_id, item, categoria, unidade, quantidade"
+        # Agora busca também alerta_qtd e alerta_on
+        cols = "id, obra_id, item, categoria, unidade, quantidade, alerta_qtd, alerta_on"
         self.cursor.execute(f"SELECT {cols} FROM estoque WHERE id=?", (item_id,))
         return self.cursor.fetchone()
+
     def get_historico(self, obra_id, filtro_item="", filtro_origem="", filtro_tipo="Todos", filtro_cat="Todas"):
         query = """
             SELECT m.id, m.data, e.item, e.categoria, m.tipo, m.quantidade, e.unidade, m.origem, m.destino, m.nota_fiscal 
@@ -458,9 +478,11 @@ class Database:
 
     # --- MÉTODOS PARA DASHBOARD ---
     def get_dashboard_stats(self, obra_id, data):
+        # Saldo Financeiro
         self.cursor.execute("SELECT SUM(CASE WHEN tipo='entrada' THEN valor ELSE -valor END) FROM financeiro WHERE obra_id=?", (obra_id,))
         saldo = self.cursor.fetchone()[0] or 0.0
         
+        # Funcionários Presentes Hoje (Count)
         self.cursor.execute("""
             SELECT COUNT(DISTINCT p.func_id) FROM presenca p
             JOIN funcionarios f ON p.func_id = f.id
@@ -468,6 +490,7 @@ class Database:
         """, (obra_id, data))
         presentes_count = self.cursor.fetchone()[0] or 0
         
+        # Lista Nominal de Funcionários Presentes
         self.cursor.execute("""
             SELECT DISTINCT f.nome FROM presenca p
             JOIN funcionarios f ON p.func_id = f.id
@@ -476,10 +499,16 @@ class Database:
         """, (obra_id, data))
         lista_presentes = [r[0] for r in self.cursor.fetchall()]
         
-        self.cursor.execute("SELECT item, quantidade, unidade FROM estoque WHERE obra_id=? AND quantidade < 5 ORDER BY quantidade ASC", (obra_id,))
+        # Materiais com estoque baixo (Respeitando a configuração alerta_qtd e alerta_on)
+        self.cursor.execute("""
+            SELECT item, quantidade, unidade 
+            FROM estoque 
+            WHERE obra_id=? AND alerta_on=1 AND quantidade < alerta_qtd 
+            ORDER BY quantidade ASC
+        """, (obra_id,))
         baixo_estoque = self.cursor.fetchall()
         
-        # CORREÇÃO CRÍTICA AQUI: Trazendo 3 colunas para corresponder ao que o Dashboard pede
+        # Dados do Diário (Clima, Atividades, Ocorrências)
         self.cursor.execute("SELECT clima, atividades, ocorrencias FROM diario WHERE obra_id=? AND data=?", (obra_id, data))
         diario = self.cursor.fetchone() 
         
@@ -588,7 +617,7 @@ class InactiveEmployeesDialog(QDialog):
             QMessageBox.information(self, "Sucesso", "Reativado!")
             self.load_data()
 
-# --- 5. DIALOGO DE EDIÇÃO DE MATERIAL ---
+# --- 5. DIALOGO DE EDIÇÃO DE MATERIAL (COM CONFIGURAÇÃO DE ALERTA) ---
 class EditMaterialDialog(QDialog):
     def __init__(self, db, item_id):
         super().__init__()
@@ -606,20 +635,41 @@ class EditMaterialDialog(QDialog):
         g.addWidget(QLabel("Categoria:"), 1, 0); g.addWidget(self.cb_cat, 1, 1)
         g.addWidget(QLabel("Unidade:"), 2, 0); g.addWidget(self.cb_unit, 2, 1)
         g.addWidget(QLabel("Saldo Atual:"), 3, 0); g.addWidget(self.sp_qtd, 3, 1)
+        
+        # CAMPO DE ALERTA
+        self.chk_alerta = QGroupBox("Configurar Alerta")
+        self.chk_alerta.setCheckable(True) 
+        lay_alerta = QHBoxLayout()
+        lay_alerta.addWidget(QLabel("Avisar se cair abaixo de:"))
+        self.sp_minimo = QDoubleSpinBox(); self.sp_minimo.setRange(0, 10000)
+        lay_alerta.addWidget(self.sp_minimo)
+        self.chk_alerta.setLayout(lay_alerta)
+        
+        l.addLayout(g)
+        l.addWidget(self.chk_alerta) # Adiciona a caixa de alerta
+        
         btn_save = QPushButton("Salvar Alterações"); btn_save.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 8px;"); btn_save.clicked.connect(self.save)
-        l.addLayout(g); l.addWidget(btn_save); self.setLayout(l)
+        l.addWidget(btn_save); self.setLayout(l)
 
     def load_data(self):
         data = self.db.get_material_by_id(self.item_id)
         if data:
             self.in_item.setText(data[2]); self.cb_cat.setCurrentText(data[3] if data[3] else "Geral")
             self.cb_unit.setCurrentText(data[4]); self.sp_qtd.setValue(data[5])
+            
+            # Carrega configuração de alerta
+            alerta_qtd = data[6] if data[6] is not None else 5.0
+            alerta_on = data[7] if data[7] is not None else 1
+            self.sp_minimo.setValue(alerta_qtd)
+            self.chk_alerta.setChecked(bool(alerta_on))
 
     def save(self):
-        self.db.update_material(self.item_id, self.in_item.text(), self.cb_cat.currentText(), self.cb_unit.currentText(), self.sp_qtd.value())
+        alerta_on = 1 if self.chk_alerta.isChecked() else 0
+        alerta_qtd = self.sp_minimo.value()
+        self.db.update_material(self.item_id, self.in_item.text(), self.cb_cat.currentText(), self.cb_unit.currentText(), self.sp_qtd.value(), alerta_qtd, alerta_on)
         QMessageBox.information(self, "Sucesso", "Item atualizado!"); self.accept()
 
-# --- 6. ABA: DASHBOARD (REMODELADA COM TEMA ESCURO) ---
+# --- 6. ABA: DASHBOARD (CORREÇÃO: LOAD_DATA CORRETO) ---
 class DashboardTab(QWidget):
     def __init__(self, db, obra_id):
         super().__init__()
@@ -688,6 +738,7 @@ class DashboardTab(QWidget):
     def update_card(self, card, val):
         card.findChild(QLabel, "v").setText(val)
     
+    # O MÉTODO CORRETO DO DASHBOARD
     def load_data(self):
         s, p_count, b_stock, diario, p_names = self.db.get_dashboard_stats(self.obra_id, QDate.currentDate().toString("yyyy-MM-dd"))
         
@@ -1356,7 +1407,7 @@ class ConstructionApp(QMainWindow):
 # --- 15. EXECUÇÃO DO PROGRAMA ---
 if __name__ == "__main__":
     with contextlib.suppress(Exception):
-        myappid = 'miiza.gestor.obras.v30_2'
+        myappid = 'miiza.gestor.obras.v30_3'
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     
     app = QApplication(sys.argv)
