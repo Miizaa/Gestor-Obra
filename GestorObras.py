@@ -18,8 +18,8 @@ from PySide6.QtCore import Qt, QDate, QSettings, QLocale, QThread, Signal
 from PySide6.QtGui import QIcon, QFont, QAction, QColor
 
 # --- CONFIGURAÇÕES DA VERSÃO ---
-APP_VERSION = "1.0.2"
-GITHUB_REPO = "Miizaa/Gestor-Obra" 
+APP_VERSION = "1.0.3" 
+GITHUB_REPO = "Miizaa/Gestor-Obra"
 
 # --- UTILITÁRIO DE CAMINHO ---
 def resource_path(relative_path):
@@ -60,7 +60,7 @@ class AutoUpdater(QDialog):
         self.setWindowTitle("Atualização Disponível")
         self.resize(300, 150)
         self.layout = QVBoxLayout()
-        self.lbl = QLabel("Iniciando download...")
+        self.lbl = QLabel("Baixando nova versão...")
         self.bar = QProgressBar()
         self.layout.addWidget(self.lbl)
         self.layout.addWidget(self.bar)
@@ -111,59 +111,50 @@ class AutoUpdater(QDialog):
             return False
 
     def start_update(self):
-        # Removemos a verificação de 'frozen' para você poder testar pelo VS Code se quiser,
-        # mas lembre-se que o 'restart' final só funciona bem no EXE.
-        
-        reply = QMessageBox.question(None, "Atualização Disponível", 
-                                     f"Nova versão {self.new_version} encontrada!\n"
-                                     "O sistema será atualizado e reiniciado.\n\n"
-                                     "Deseja atualizar agora?", 
-                                     QMessageBox.Yes|QMessageBox.No)
-        
-        if reply == QMessageBox.Yes:
+        if not getattr(sys, 'frozen', False):
+            return
+
+        if QMessageBox.question(None, "Atualização", f"Nova versão {self.new_version} disponível.\nDeseja atualizar agora?", 
+                                QMessageBox.Yes|QMessageBox.No) == QMessageBox.Yes:
             self.show()
             self.worker = UpdateWorker(self.download_url, "update_temp.exe")
             self.worker.progress.connect(self.bar.setValue)
             self.worker.finished.connect(self.apply_update)
-            self.worker.error.connect(self.on_error)
             self.worker.start()
 
-    def on_error(self, err_msg):
-        QMessageBox.critical(self, "Erro Download", f"Falha ao baixar:\n{err_msg}")
-        self.close()
-
     def apply_update(self):
-        self.lbl.setText("Finalizando...")
+        self.lbl.setText("Preparando para reiniciar...")
         nome_atual = os.path.basename(sys.executable)
         
-        # Script BAT ainda mais agressivo para garantir a troca
         bat_script = f"""
 @echo off
-taskkill /F /IM "{nome_atual}" > NUL 2>&1
-timeout /t 1 /nobreak > NUL
-del "{nome_atual}"
-if exist "{nome_atual}" goto fail
-ren "update_temp.exe" "{nome_atual}"
-start "" "{nome_atual}"
-del "%~f0"
-exit
+title Atualizando Sistema...
+echo Aguardando o fechamento do programa...
+timeout /t 2 /nobreak > NUL
 
-:fail
-echo Falha ao substituir arquivo. Tente executar como Admin.
-pause
+:loop
+del "{nome_atual}"
+if exist "{nome_atual}" (
+    echo Arquivo ainda em uso. Tentando novamente em 1 segundo...
+    timeout /t 1 /nobreak > NUL
+    goto loop
+)
+
+echo Atualizando...
+ren "update_temp.exe" "{nome_atual}"
+echo Iniciando nova versao...
+start "" "{nome_atual}"
 del "%~f0"
         """
         
         try:
             with open("updater.bat", "w") as f:
                 f.write(bat_script)
-            
-            # Executa e força saída
             subprocess.Popen("updater.bat", shell=True)
             QApplication.quit()
             sys.exit(0)
         except Exception as e:
-            QMessageBox.critical(self, "Erro", f"Falha ao criar script de atualização: {e}")
+            QMessageBox.critical(self, "Erro", f"Falha ao iniciar atualização: {e}")
 
 # --- 1. BANCO DE DADOS ---
 class Database:
@@ -186,6 +177,7 @@ class Database:
                 obra_id INTEGER, 
                 nome TEXT, funcao TEXT, data_admissao TEXT, telefone TEXT,
                 cpf TEXT, rg TEXT, banco TEXT, agencia TEXT, conta TEXT,
+                valor_diaria REAL DEFAULT 0.0,
                 ativo INTEGER DEFAULT 1,
                 FOREIGN KEY(obra_id) REFERENCES obras(id)
             )
@@ -210,7 +202,6 @@ class Database:
                 UNIQUE(func_id, data)
             )
         """)
-        # ATUALIZADO: Estoque com alerta_qtd e alerta_on
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS estoque (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -280,6 +271,9 @@ class Database:
             self.cursor.execute("ALTER TABLE funcionarios ADD COLUMN telefone TEXT")
         if not self.check_column_exists("funcionarios", "ativo"):
             self.cursor.execute("ALTER TABLE funcionarios ADD COLUMN ativo INTEGER DEFAULT 1")
+        if not self.check_column_exists("funcionarios", "valor_diaria"):
+            self.cursor.execute("ALTER TABLE funcionarios ADD COLUMN valor_diaria REAL DEFAULT 0.0")
+
         if not self.check_column_exists("estoque", "categoria"):
             self.cursor.execute("ALTER TABLE estoque ADD COLUMN categoria TEXT DEFAULT 'Geral'")
         if not self.check_column_exists("movimentacoes", "origem"):
@@ -296,7 +290,6 @@ class Database:
         if not self.check_column_exists("financeiro", "nota_fiscal"):
             self.cursor.execute("ALTER TABLE financeiro ADD COLUMN nota_fiscal TEXT")
         
-        # MIGRAÇÃO ALERTA ESTOQUE
         if not self.check_column_exists("estoque", "alerta_qtd"):
             self.cursor.execute("ALTER TABLE estoque ADD COLUMN alerta_qtd REAL DEFAULT 5.0")
         if not self.check_column_exists("estoque", "alerta_on"):
@@ -319,20 +312,20 @@ class Database:
         return self.cursor.fetchall()
 
     # --- FUNCIONÁRIOS ---
-    def add_funcionario(self, obra_id, *args):
+    def add_funcionario(self, obra_id, nome, funcao, admissao, tel, cpf, rg, banco, agencia, conta, diaria):
         try:
             self.cursor.execute("""
-                INSERT INTO funcionarios (obra_id, nome, funcao, data_admissao, telefone, cpf, rg, banco, agencia, conta, ativo) 
-                VALUES (?,?,?,?,?,?,?,?,?,?,1)""", (obra_id, *args))
+                INSERT INTO funcionarios (obra_id, nome, funcao, data_admissao, telefone, cpf, rg, banco, agencia, conta, valor_diaria, ativo) 
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,1)""", (obra_id, nome, funcao, admissao, tel, cpf, rg, banco, agencia, conta, diaria))
             self.conn.commit(); return True
         except: return False
 
-    def update_funcionario(self, fid, *args):
+    def update_funcionario(self, fid, nome, funcao, admissao, tel, cpf, rg, banco, agencia, conta, diaria):
         try:
             self.cursor.execute("""
                 UPDATE funcionarios 
-                SET nome=?, funcao=?, data_admissao=?, telefone=?, cpf=?, rg=?, banco=?, agencia=?, conta=? 
-                WHERE id=?""", (*args, fid))
+                SET nome=?, funcao=?, data_admissao=?, telefone=?, cpf=?, rg=?, banco=?, agencia=?, conta=?, valor_diaria=? 
+                WHERE id=?""", (nome, funcao, admissao, tel, cpf, rg, banco, agencia, conta, diaria, fid))
             self.conn.commit(); return True
         except: return False
 
@@ -351,7 +344,7 @@ class Database:
         return self.cursor.fetchall()
 
     def get_funcionarios(self, obra_id, apenas_ativos=True):
-        cols = "id, obra_id, nome, funcao, data_admissao, telefone, cpf, rg, banco, agencia, conta, ativo"
+        cols = "id, obra_id, nome, funcao, data_admissao, telefone, cpf, rg, banco, agencia, conta, ativo, valor_diaria"
         if apenas_ativos:
             self.cursor.execute(f"SELECT {cols} FROM funcionarios WHERE obra_id=? AND ativo=1 ORDER BY nome ASC", (obra_id,))
         else:
@@ -359,7 +352,7 @@ class Database:
         return self.cursor.fetchall()
     
     def get_funcionario_by_id(self, fid):
-        cols = "id, obra_id, nome, funcao, data_admissao, telefone, cpf, rg, banco, agencia, conta, ativo"
+        cols = "id, obra_id, nome, funcao, data_admissao, telefone, cpf, rg, banco, agencia, conta, ativo, valor_diaria"
         self.cursor.execute(f"SELECT {cols} FROM funcionarios WHERE id=?", (fid,))
         return self.cursor.fetchone()
 
@@ -383,11 +376,13 @@ class Database:
         for r in self.cursor.fetchall(): resultado[r[0]] = {'m': r[1], 't': r[2]}
         return resultado
     
+    # --- RELATÓRIO CORRIGIDO PARA POPULAR DADOS FINANCEIROS ---
     def relatorio_periodo(self, obra_id, d1, d2):
         self.cursor.execute("""
             SELECT f.nome, f.funcao, f.data_admissao, f.telefone, 
                    SUM(COALESCE(p.manha, 0) + COALESCE(p.tarde, 0)) * 0.5 as dias, 
-                   f.cpf, f.rg, f.banco, f.agencia, f.conta 
+                   f.cpf, f.rg, f.banco, f.agencia, f.conta,
+                   f.valor_diaria  -- Este é o índice 10
             FROM funcionarios f 
             LEFT JOIN presenca p ON f.id=p.func_id AND p.data BETWEEN ? AND ? 
             WHERE f.obra_id = ?
@@ -414,7 +409,6 @@ class Database:
         return self.cursor.fetchall()
     
     def get_material_by_id(self, item_id):
-        # Agora busca também alerta_qtd e alerta_on
         cols = "id, obra_id, item, categoria, unidade, quantidade, alerta_qtd, alerta_on"
         self.cursor.execute(f"SELECT {cols} FROM estoque WHERE id=?", (item_id,))
         return self.cursor.fetchone()
@@ -432,12 +426,9 @@ class Database:
             query += " AND (m.origem LIKE ? OR m.destino LIKE ?)"
             params.append(f"%{filtro_origem}%"); params.append(f"%{filtro_origem}%")
         if filtro_tipo != "Todos":
-            if filtro_tipo == "Entrada":
-                query += " AND m.tipo = 'entrada'"
-            elif filtro_tipo == "Saída":
-                query += " AND m.tipo = 'saida'"
-            elif filtro_tipo == "Uso Interno":
-                query += " AND m.tipo = 'uso_interno'"
+            if filtro_tipo == "Entrada": query += " AND m.tipo = 'entrada'"
+            elif filtro_tipo == "Saída": query += " AND m.tipo = 'saida'"
+            elif filtro_tipo == "Uso Interno": query += " AND m.tipo = 'uso_interno'"
         
         if filtro_cat != "Todas": query += " AND e.categoria = ?"; params.append(filtro_cat)
         query += " ORDER BY m.data DESC, m.id DESC"
@@ -811,7 +802,12 @@ class EmployeeManager(QWidget):
         self.f.addItems(sorted(["Pedreiro", "Ajudante", "Mestre", "Encarregado", "Eletricista", "Pintor", "Encanador", "Estagiário", "Engenheiro", "Soldador"]))
         self.d_adm = QDateEdit(); self.d_adm.setCalendarPopup(True); self.d_adm.setDate(QDate.currentDate()); self.d_adm.setDisplayFormat("dd/MM/yyyy") 
         self.tel = QLineEdit(); self.cpf = QLineEdit(); self.rg = QLineEdit(); self.b = QLineEdit(); self.ag = QLineEdit(); self.c = QLineEdit()
+        
+        # CAMPO NOVO: VALOR DIÁRIA
+        self.sp_diaria = QDoubleSpinBox(); self.sp_diaria.setRange(0, 5000); self.sp_diaria.setPrefix("R$ ")
+        
         [w.setPlaceholderText(t) for w, t in zip([self.n, self.tel, self.cpf, self.rg, self.b, self.ag, self.c], ["Nome", "Telefone", "CPF", "RG", "Banco", "Agência", "Conta"])]
+        
         bt_save = QPushButton("Salvar"); bt_save.clicked.connect(self.sv)
         bt_clear = QPushButton("Limpar"); bt_clear.clicked.connect(self.rst)
         self.bt_del = QPushButton("❌ Desativar"); self.bt_del.setStyleSheet("background-color: #F44336; color: white;")
@@ -823,8 +819,11 @@ class EmployeeManager(QWidget):
         g.addWidget(QLabel("Doc:"),1,0); g.addWidget(self.cpf,1,1); g.addWidget(self.rg,1,2)
         g.addWidget(QLabel("Admissão:"),1,3); g.addWidget(self.d_adm,1,4); g.addWidget(QLabel("Telefone:"),0,3); g.addWidget(self.tel,0,4) 
         g.addWidget(QLabel("Banc:"),2,0); g.addWidget(self.b,2,1); g.addWidget(self.ag,2,2); g.addWidget(self.c,2,3)
+        g.addWidget(QLabel("Valor Diária (R$):"), 2, 4); g.addWidget(self.sp_diaria, 2, 5) # Adicionado no layout
+        
         hbox_btns = QHBoxLayout(); hbox_btns.addWidget(btn_hist); hbox_btns.addWidget(bt_clear); hbox_btns.addWidget(self.bt_del); hbox_btns.addWidget(bt_save)
-        g.addLayout(hbox_btns, 3, 0, 1, 5); gb.setLayout(g)
+        g.addLayout(hbox_btns, 3, 0, 1, 6); gb.setLayout(g)
+        
         self.dt = QDateEdit(); self.dt.setCalendarPopup(True); self.dt.setDate(QDate.currentDate()); self.dt.dateChanged.connect(self.ld); self.dt.setDisplayFormat("dd/MM/yyyy")
         
         # COLUNAS ATUALIZADAS (MANHÃ/TARDE)
@@ -845,7 +844,8 @@ class EmployeeManager(QWidget):
 
     def sv(self):
         s_adm = self.d_adm.date().toString("yyyy-MM-dd")
-        a = (self.n.text(), self.f.currentText(), s_adm, self.tel.text(), self.cpf.text(), self.rg.text(), self.b.text(), self.ag.text(), self.c.text())
+        diaria = self.sp_diaria.value()
+        a = (self.n.text(), self.f.currentText(), s_adm, self.tel.text(), self.cpf.text(), self.rg.text(), self.b.text(), self.ag.text(), self.c.text(), diaria)
         if not a[0]: return
         if self.eid: self.db.update_funcionario(self.eid, *a)
         else: self.db.add_funcionario(self.obra_id, *a)
@@ -856,7 +856,9 @@ class EmployeeManager(QWidget):
         self.n.setText(d[2]); self.f.setCurrentText(d[3])
         try: self.d_adm.setDate(QDate.fromString(d[4], "yyyy-MM-dd"))
         except: self.d_adm.setDate(QDate.currentDate())
-        self.tel.setText(d[5]); self.cpf.setText(d[6]); self.rg.setText(d[7]); self.b.setText(d[8]); self.ag.setText(d[9]); self.c.setText(d[10]); self.bt_del.setVisible(True)
+        self.tel.setText(d[5]); self.cpf.setText(d[6]); self.rg.setText(d[7]); self.b.setText(d[8]); self.ag.setText(d[9]); self.c.setText(d[10])
+        if len(d) > 12: self.sp_diaria.setValue(d[12] if d[12] else 0.0)
+        self.bt_del.setVisible(True)
 
     def desativar(self):
         if not self.eid: return
@@ -876,7 +878,8 @@ class EmployeeManager(QWidget):
         dlg.exec()
 
     def rst(self): 
-        self.eid=None; self.n.clear(); self.cpf.clear(); self.rg.clear(); self.tel.clear(); self.b.clear(); self.ag.clear(); self.c.clear(); self.d_adm.setDate(QDate.currentDate()); self.bt_del.setVisible(False)
+        self.eid=None; self.n.clear(); self.cpf.clear(); self.rg.clear(); self.tel.clear(); self.b.clear(); self.ag.clear(); self.c.clear(); 
+        self.sp_diaria.setValue(0); self.d_adm.setDate(QDate.currentDate()); self.bt_del.setVisible(False)
 
     def ld(self):
         fs = self.db.get_funcionarios(self.obra_id); p = self.db.get_presenca_dia(self.obra_id, self.dt.date().toString("yyyy-MM-dd"))
@@ -1045,8 +1048,10 @@ class StockControl(QWidget):
         try:
             with open(path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f, delimiter=';')
+                # Header
                 headers = [table.horizontalHeaderItem(i).text() for i in range(table.columnCount()) if not table.isColumnHidden(i)]
                 writer.writerow(headers)
+                # Rows
                 for r in range(table.rowCount()):
                     row_data = []
                     for c in range(table.columnCount()):
@@ -1070,10 +1075,22 @@ class ReportTab(QWidget):
         [d.setCalendarPopup(True) for d in [d1,d2]]
         b = QPushButton("Gerar Relatório"); b.clicked.connect(lambda: self.g(d1.date().toString("yyyy-MM-dd"),d2.date().toString("yyyy-MM-dd")))
         b_export = QPushButton("📤 Exportar Relatório"); b_export.clicked.connect(self.export_report)
-        h=QHBoxLayout(); h.addWidget(d1); h.addWidget(d2); h.addWidget(b); h.addWidget(b_export); self.t=QTableWidget(0,10)
-        self.t.setHorizontalHeaderLabels(["Nome","Função","Admissão","Telefone","Dias","CPF","RG","Banco","Agência","Conta"])
+        h=QHBoxLayout(); h.addWidget(d1); h.addWidget(d2); h.addWidget(b); h.addWidget(b_export); 
+        
+        # TABELA ATUALIZADA: 12 Colunas (Adicionado Diária e Total)
+        self.t=QTableWidget(0,12)
+        colunas = ["Nome","Função","Admissão","Telefone","Dias","CPF","RG","Banco","Agência","Conta", "Valor Diária", "Total a Pagar"]
+        self.t.setHorizontalHeaderLabels(colunas)
         header = self.t.horizontalHeader(); header.setSectionResizeMode(QHeaderView.Interactive); header.setStretchLastSection(True); self.t.setColumnWidth(0, 200)
-        l.addLayout(h); l.addWidget(self.t); self.setLayout(l)
+        
+        l.addLayout(h); l.addWidget(self.t)
+        
+        # LABEL DE TOTAL GERAL
+        self.lbl_total_folha = QLabel("Total Geral da Folha: R$ 0,00")
+        self.lbl_total_folha.setStyleSheet("font-size: 16px; font-weight: bold; color: #333; margin-top: 5px;")
+        l.addWidget(self.lbl_total_folha)
+        
+        self.setLayout(l)
     
     def save_table_state(self):
         QSettings("MiizaSoft", "GestorObras").setValue("report_table_state", self.t.horizontalHeader().saveState())
@@ -1082,16 +1099,36 @@ class ReportTab(QWidget):
 
     def g(self,d1,d2):
         ds=self.db.relatorio_periodo(self.obra_id, d1, d2); self.t.setRowCount(0)
+        total_geral = 0.0
+        
         for r,row in enumerate(ds): 
-            self.t.insertRow(r); self.t.setItem(r, 0, QTableWidgetItem(row[0])); self.t.setItem(r, 1, QTableWidgetItem(row[1]))
+            self.t.insertRow(r)
+            # row: 0=nome, 1=funcao, 2=adm, 3=tel, 4=dias, 5=cpf, 6=rg, 7=banco, 8=ag, 9=conta, 10=valor_diaria
+            self.t.setItem(r, 0, QTableWidgetItem(row[0])); self.t.setItem(r, 1, QTableWidgetItem(row[1]))
             try: fmt = QDate.fromString(row[2], "yyyy-MM-dd").toString("dd/MM/yyyy")
             except: fmt = row[2]
             self.t.setItem(r, 2, QTableWidgetItem(fmt)); self.t.setItem(r, 3, QTableWidgetItem(row[3])) 
-            self.t.setItem(r, 4, QTableWidgetItem(str(row[4]))); self.t.setItem(r, 5, QTableWidgetItem(row[5])); self.t.setItem(r, 6, QTableWidgetItem(row[6]))
+            
+            dias_trabalhados = row[4] if row[4] else 0.0
+            self.t.setItem(r, 4, QTableWidgetItem(str(dias_trabalhados)))
+            
+            self.t.setItem(r, 5, QTableWidgetItem(row[5])); self.t.setItem(r, 6, QTableWidgetItem(row[6]))
             self.t.setItem(r, 7, QTableWidgetItem(row[7])); self.t.setItem(r, 8, QTableWidgetItem(row[8])); self.t.setItem(r, 9, QTableWidgetItem(row[9]))
+            
+            # CÁLCULO FINANCEIRO (GARANTIA DE NÃO-NULO)
+            valor_diaria = row[10] if len(row) > 10 and row[10] else 0.0
+            total_pagar = dias_trabalhados * valor_diaria
+            total_geral += total_pagar
+            
+            self.t.setItem(r, 10, QTableWidgetItem(f"R$ {valor_diaria:.2f}"))
+            item_total = QTableWidgetItem(f"R$ {total_pagar:.2f}")
+            item_total.setForeground(Qt.darkGreen); item_total.setFont(QFont("Arial", 9, QFont.Bold))
+            self.t.setItem(r, 11, item_total)
+
+        self.lbl_total_folha.setText(f"Total Geral da Folha: R$ {total_geral:.2f}")
     
     def export_report(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Exportar Relatório", "relatorio_presenca.csv", "CSV Files (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(self, "Exportar Relatório", "folha_pagamento.csv", "CSV Files (*.csv)")
         if not path: return
         try:
             with open(path, 'w', newline='', encoding='utf-8') as f:
@@ -1440,7 +1477,7 @@ class ConstructionApp(QMainWindow):
 # --- 15. EXECUÇÃO DO PROGRAMA ---
 if __name__ == "__main__":
     with contextlib.suppress(Exception):
-        myappid = 'miiza.gestor.obras.v30_3'
+        myappid = 'miiza.gestor.obras.v31_1'
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     
     app = QApplication(sys.argv)
