@@ -18,8 +18,8 @@ from PySide6.QtCore import Qt, QDate, QSettings, QLocale, QThread, Signal
 from PySide6.QtGui import QIcon, QFont, QAction, QColor
 
 # --- CONFIGURAÇÕES DA VERSÃO ---
-APP_VERSION = "1.0.2.0"
-GITHUB_REPO = "Miizaa/Gerenciamento-Obra" 
+APP_VERSION = "1.0.2"
+GITHUB_REPO = "Miizaa/Gestor-Obra" 
 
 # --- UTILITÁRIO DE CAMINHO ---
 def resource_path(relative_path):
@@ -60,7 +60,7 @@ class AutoUpdater(QDialog):
         self.setWindowTitle("Atualização Disponível")
         self.resize(300, 150)
         self.layout = QVBoxLayout()
-        self.lbl = QLabel("Baixando nova versão...")
+        self.lbl = QLabel("Iniciando download...")
         self.bar = QProgressBar()
         self.layout.addWidget(self.lbl)
         self.layout.addWidget(self.bar)
@@ -69,68 +69,101 @@ class AutoUpdater(QDialog):
         self.new_version = ""
 
     def check_updates(self):
+        """Verifica atualizações com mensagens de DEBUG"""
         try:
+            # 1. Tenta conectar
             api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            print(f"Buscando atualizações em: {api_url}")
+            
             resp = requests.get(api_url, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                tag_name = data.get("tag_name", "").replace("v", "")
-                if tag_name != APP_VERSION:
-                    assets = data.get("assets", [])
-                    for asset in assets:
-                        if asset["name"].endswith(".exe"):
-                            self.download_url = asset["browser_download_url"]
-                            self.new_version = tag_name
-                            return True
+            
+            if resp.status_code != 200:
+                # DEBUG: Mostra erro se não conectar (ex: 404 se o repo não existir/for privado)
+                QMessageBox.warning(None, "Debug Updater", f"Erro ao conectar no GitHub.\nStatus Code: {resp.status_code}\nRepo: {GITHUB_REPO}")
+                return False
+
+            data = resp.json()
+            tag_name = data.get("tag_name", "").replace("v", "")
+            
+            # DEBUG: Mostra o que ele encontrou
+            # Remova esta linha quando tudo estiver funcionando
+            # QMessageBox.information(None, "Debug Updater", f"Versão Local: {APP_VERSION}\nVersão GitHub: {tag_name}")
+
+            if tag_name != APP_VERSION:
+                assets = data.get("assets", [])
+                if not assets:
+                    QMessageBox.warning(None, "Debug Updater", "Release encontrada, mas sem arquivos (assets) anexados.")
+                    return False
+                    
+                for asset in assets:
+                    if asset["name"].endswith(".exe"):
+                        self.download_url = asset["browser_download_url"]
+                        self.new_version = tag_name
+                        return True
+                
+                QMessageBox.warning(None, "Debug Updater", "Release encontrada, mas nenhum arquivo .exe encontrado nos assets.")
+            
             return False
-        except:
+            
+        except Exception as e:
+            # DEBUG: Mostra o erro real (ex: falta de internet)
+            QMessageBox.critical(None, "Erro no Updater", f"Erro técnico:\n{str(e)}")
             return False
 
     def start_update(self):
-        if not getattr(sys, 'frozen', False):
-            return
-
-        if QMessageBox.question(None, "Atualização", f"Nova versão {self.new_version} disponível.\nDeseja atualizar agora?", 
-                                QMessageBox.Yes|QMessageBox.No) == QMessageBox.Yes:
+        # Removemos a verificação de 'frozen' para você poder testar pelo VS Code se quiser,
+        # mas lembre-se que o 'restart' final só funciona bem no EXE.
+        
+        reply = QMessageBox.question(None, "Atualização Disponível", 
+                                     f"Nova versão {self.new_version} encontrada!\n"
+                                     "O sistema será atualizado e reiniciado.\n\n"
+                                     "Deseja atualizar agora?", 
+                                     QMessageBox.Yes|QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
             self.show()
             self.worker = UpdateWorker(self.download_url, "update_temp.exe")
             self.worker.progress.connect(self.bar.setValue)
             self.worker.finished.connect(self.apply_update)
+            self.worker.error.connect(self.on_error)
             self.worker.start()
 
+    def on_error(self, err_msg):
+        QMessageBox.critical(self, "Erro Download", f"Falha ao baixar:\n{err_msg}")
+        self.close()
+
     def apply_update(self):
-        self.lbl.setText("Preparando para reiniciar...")
+        self.lbl.setText("Finalizando...")
         nome_atual = os.path.basename(sys.executable)
         
+        # Script BAT ainda mais agressivo para garantir a troca
         bat_script = f"""
 @echo off
-title Atualizando Sistema...
-echo Aguardando o fechamento do programa...
-timeout /t 2 /nobreak > NUL
-
-:loop
+taskkill /F /IM "{nome_atual}" > NUL 2>&1
+timeout /t 1 /nobreak > NUL
 del "{nome_atual}"
-if exist "{nome_atual}" (
-    echo Arquivo ainda em uso. Tentando novamente em 1 segundo...
-    timeout /t 1 /nobreak > NUL
-    goto loop
-)
-
-echo Atualizando...
+if exist "{nome_atual}" goto fail
 ren "update_temp.exe" "{nome_atual}"
-echo Iniciando nova versao...
 start "" "{nome_atual}"
+del "%~f0"
+exit
+
+:fail
+echo Falha ao substituir arquivo. Tente executar como Admin.
+pause
 del "%~f0"
         """
         
         try:
             with open("updater.bat", "w") as f:
                 f.write(bat_script)
+            
+            # Executa e força saída
             subprocess.Popen("updater.bat", shell=True)
             QApplication.quit()
             sys.exit(0)
         except Exception as e:
-            QMessageBox.critical(self, "Erro", f"Falha ao iniciar atualização: {e}")
+            QMessageBox.critical(self, "Erro", f"Falha ao criar script de atualização: {e}")
 
 # --- 1. BANCO DE DADOS ---
 class Database:
