@@ -18,7 +18,7 @@ from PySide6.QtCore import Qt, QDate, QSettings, QLocale, QThread, Signal
 from PySide6.QtGui import QIcon, QFont, QAction, QColor
 
 # --- CONFIGURAÇÕES DA VERSÃO ---
-APP_VERSION = "1.0.1" 
+APP_VERSION = "1.0.2.0"
 GITHUB_REPO = "Miizaa/Gerenciamento-Obra" 
 
 # --- UTILITÁRIO DE CAMINHO ---
