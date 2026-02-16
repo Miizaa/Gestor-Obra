@@ -1,4 +1,5 @@
 .venv/
+.vs/
 GestorObras.build/
 GestorObras.dist/
 GestorObras.onefile-build/
