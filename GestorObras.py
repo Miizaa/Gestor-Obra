@@ -372,9 +372,7 @@ class Database:
             JOIN funcionarios f ON p.func_id = f.id
             WHERE f.obra_id = ? AND p.data = ?
         """, (obra_id, data))
-        resultado = {}
-        for r in self.cursor.fetchall(): resultado[r[0]] = {'m': r[1], 't': r[2]}
-        return resultado
+        return {r[0]: {'m': r[1], 't': r[2]} for r in self.cursor.fetchall()}
     
     # --- RELATÓRIO CORRIGIDO PARA POPULAR DADOS FINANCEIROS ---
     def relatorio_periodo(self, obra_id, d1, d2):
@@ -425,14 +423,16 @@ class Database:
         if filtro_origem: 
             query += " AND (m.origem LIKE ? OR m.destino LIKE ?)"
             params.append(f"%{filtro_origem}%"); params.append(f"%{filtro_origem}%")
-        if filtro_tipo != "Todos":
-            if filtro_tipo == "Entrada": query += " AND m.tipo = 'entrada'"
-            elif filtro_tipo == "Saída": query += " AND m.tipo = 'saida'"
-            elif filtro_tipo == "Uso Interno": query += " AND m.tipo = 'uso_interno'"
-        
+        if filtro_tipo == "Entrada":
+            query += " AND m.tipo = 'entrada'"
+        elif filtro_tipo == "Saída":
+            query += " AND m.tipo = 'saida'"
+        elif filtro_tipo == "Uso Interno":
+            query += " AND m.tipo = 'uso_interno'"
         if filtro_cat != "Todas": query += " AND e.categoria = ?"; params.append(filtro_cat)
         query += " ORDER BY m.data DESC, m.id DESC"
-        self.cursor.execute(query, params); return self.cursor.fetchall()
+        self.cursor.execute(query, params)
+        return self.cursor.fetchall()
     
     def movimentar_estoque(self, item_id, qtd, tipo, data, origem, destino, nf):
         fator = 1 if tipo == "entrada" else -1
@@ -578,9 +578,11 @@ class ProjectSelector(QDialog):
             self.db.criar_obra(self.in_nome.text(), self.in_end.text())
             self.in_nome.clear(); self.in_end.clear(); self.load_list(); QMessageBox.information(self, "Sucesso", "Nova obra criada!")
     def abrir_obra(self):
-        current_item = self.list_obras.currentItem()
-        if current_item: self.selected_obra = current_item.data(Qt.UserRole); self.accept()
-        else: QMessageBox.warning(self, "Aviso", "Selecione uma obra.")
+        if current_item := self.list_obras.currentItem():
+            if current_item: self.selected_obra = current_item.data(Qt.UserRole)
+            if current_item: self.selected_obra = current_item.data(Qt.UserRole); self.accept()
+        else:
+            QMessageBox.warning(self, "Aviso", "Selecione uma obra.")
 
 # --- 3. DIÁLOGO DE HISTÓRICO ---
 class EmployeeHistoryDialog(QDialog):
@@ -676,11 +678,12 @@ class EditMaterialDialog(QDialog):
         l.addWidget(btn_save); self.setLayout(l)
 
     def load_data(self):
-        data = self.db.get_material_by_id(self.item_id)
-        if data:
-            self.in_item.setText(data[2]); self.cb_cat.setCurrentText(data[3] if data[3] else "Geral")
-            self.cb_unit.setCurrentText(data[4]); self.sp_qtd.setValue(data[5])
-            
+        if data := self.db.get_material_by_id(self.item_id):
+            self.in_item.setText(data[2])
+            self.cb_cat.setCurrentText(data[3] or "Geral")
+            self.cb_unit.setCurrentText(data[4])
+            self.sp_qtd.setValue(data[5])
+
             # Carrega configuração de alerta
             alerta_qtd = data[6] if data[6] is not None else 5.0
             alerta_on = data[7] if data[7] is not None else 1
@@ -770,9 +773,9 @@ class DashboardTab(QWidget):
         self.update_card(self.card_func, str(p_count))
         
         if diario:
-            self.update_card(self.card_clima, diario[0] if diario[0] else "--")
-            self.txt_ativ.setPlainText(diario[1] if diario[1] else "Nenhuma atividade registrada.")
-            self.txt_ocor.setPlainText(diario[2] if diario[2] else "Nenhuma ocorrência.")
+            self.update_card(self.card_clima, diario[0] or "--")
+            self.txt_ativ.setPlainText(diario[1] or "Nenhuma atividade registrada.")
+            self.txt_ocor.setPlainText(diario[2] or "Nenhuma ocorrência.")
         else:
             self.update_card(self.card_clima, "--")
             self.txt_ativ.setPlainText("Diário de hoje não criado.")
@@ -857,7 +860,7 @@ class EmployeeManager(QWidget):
         try: self.d_adm.setDate(QDate.fromString(d[4], "yyyy-MM-dd"))
         except: self.d_adm.setDate(QDate.currentDate())
         self.tel.setText(d[5]); self.cpf.setText(d[6]); self.rg.setText(d[7]); self.b.setText(d[8]); self.ag.setText(d[9]); self.c.setText(d[10])
-        if len(d) > 12: self.sp_diaria.setValue(d[12] if d[12] else 0.0)
+        if len(d) > 12: self.sp_diaria.setValue(d[12] or 0.0)
         self.bt_del.setVisible(True)
 
     def desativar(self):
@@ -872,7 +875,7 @@ class EmployeeManager(QWidget):
         rows = self.tb.selectionModel().selectedRows()
         if not rows and not self.eid: 
             QMessageBox.warning(self, "Aviso", "Selecione um funcionário na tabela ou carregue um."); return
-        fid = self.eid if self.eid else int(self.tb.item(rows[0].row(), 0).text())
+        fid = self.eid or int(self.tb.item(rows[0].row(), 0).text())
         fname = self.n.text() if self.eid else self.tb.item(rows[0].row(), 1).text()
         dlg = EmployeeHistoryDialog(self.db, fid, fname)
         dlg.exec()
@@ -998,13 +1001,13 @@ class StockControl(QWidget):
         with contextlib.suppress(Exception):
             data_iso = self.dt.date().toString("yyyy-MM-dd")
             self.db.movimentar_estoque(self.sid, float(self.in_q.text().replace(',','.')), t, data_iso, self.in_origem.text(), self.in_dest.text(), self.in_nf.text())
+        if QMessageBox.question(self, "Confirmar", "Excluir movimentação?", QMessageBox.Yes|QMessageBox.No)==QMessageBox.Yes and self.db.excluir_movimentacao(mov_id):
             self.ref()
-    def delete_move(self):
         rows = self.tb_h.selectionModel().selectedRows()
         if not rows: QMessageBox.warning(self, "Aviso", "Selecione uma movimentação."); return
         mov_id = int(self.tb_h.item(rows[0].row(), 0).text())
-        if QMessageBox.question(self, "Confirmar", "Excluir movimentação?", QMessageBox.Yes|QMessageBox.No)==QMessageBox.Yes:
-            if self.db.excluir_movimentacao(mov_id): self.ref()
+        if QMessageBox.question(self, "Confirmar", "Excluir movimentação?", QMessageBox.Yes|QMessageBox.No)==QMessageBox.Yes and self.db.excluir_movimentacao(mov_id):
+            self.ref()
     def edit_item(self):
         rows = self.tb_s.selectionModel().selectedRows()
         if not rows: QMessageBox.warning(self, "Aviso", "Selecione um item na tabela de saldo."); return
@@ -1109,7 +1112,7 @@ class ReportTab(QWidget):
             except: fmt = row[2]
             self.t.setItem(r, 2, QTableWidgetItem(fmt)); self.t.setItem(r, 3, QTableWidgetItem(row[3])) 
             
-            dias_trabalhados = row[4] if row[4] else 0.0
+            dias_trabalhados = row[4] or 0.0
             self.t.setItem(r, 4, QTableWidgetItem(str(dias_trabalhados)))
             
             self.t.setItem(r, 5, QTableWidgetItem(row[5])); self.t.setItem(r, 6, QTableWidgetItem(row[6]))
@@ -1178,8 +1181,7 @@ class MaterialCalculator(QWidget):
     def get_val_in_meters(self, val_text, unit):
         try:
             val = float(val_text.replace(',', '.'))
-            if unit == "cm": return val / 100
-            return val
+            return val / 100 if unit == "cm" else val
         except: return 0.0
 
     def ca(self):
@@ -1233,11 +1235,16 @@ class DiaryTab(QWidget):
         l.addWidget(btn_save)
         self.setLayout(l); self.load_data()
     def load_data(self):
-        data = self.db.get_diario(self.obra_id, self.dt.date().toString("yyyy-MM-dd"))
-        if data:
-            self.txt_clima.setPlainText(data[0]); self.txt_ativ.setPlainText(data[1]); self.txt_ocor.setPlainText(data[2])
+        if data := self.db.get_diario(
+            self.obra_id, self.dt.date().toString("yyyy-MM-dd")
+        ):
+            self.txt_clima.setPlainText(data[0])
+            self.txt_ativ.setPlainText(data[1])
+            self.txt_ocor.setPlainText(data[2])
         else:
-            self.txt_clima.clear(); self.txt_ativ.clear(); self.txt_ocor.clear()
+            self.txt_clima.clear()
+            self.txt_ativ.clear()
+            self.txt_ocor.clear()
     def save(self):
         self.db.save_diario(self.obra_id, self.dt.date().toString("yyyy-MM-dd"), self.txt_clima.toPlainText(), self.txt_ativ.toPlainText(), self.txt_ocor.toPlainText())
         QMessageBox.information(self, "Sucesso", "Diário salvo!")
