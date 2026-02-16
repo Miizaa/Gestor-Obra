@@ -62,7 +62,7 @@ Um aplicativo Desktop completo para **Gestores de Obra**. Desenvolvido para faci
 
 1.  **Clone ou baixe o repositório:**
     ```bash
-    git clone [https://github.com/seu-usuario/gestor-de-obras.git](https://github.com/seu-usuario/gestor-de-obras.git)
+    git clone [https://github.com/Miizaa/Gestor-Obra.git](https://github.com/miizaa/gestor-obra.git)
     cd gestor-de-obras
     ```
 
