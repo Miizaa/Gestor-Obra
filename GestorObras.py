@@ -121,6 +121,7 @@ class AutoUpdater(QDialog):
         self.setLayout(self.layout)
         self.download_url = ""
         self.new_version = ""
+        self.release_notes = ""  # NOVO: Variável para guardar o texto do GitHub
         self.is_windows = sys.platform == "win32"
 
     def check_updates(self):
@@ -130,6 +131,10 @@ class AutoUpdater(QDialog):
             if resp.status_code == 200:
                 data = resp.json()
                 tag_name = data.get("tag_name", "").replace("v", "")
+                
+                # NOVO: Pega o texto preenchido lá no GitHub
+                self.release_notes = data.get("body", "Nenhuma nota de atualização fornecida.")
+                
                 if tag_name != APP_VERSION:
                     assets = data.get("assets", [])
                     for asset in assets:
@@ -150,8 +155,21 @@ class AutoUpdater(QDialog):
         if not getattr(sys, 'frozen', False):
             return
 
-        if QMessageBox.question(None, "Atualização", f"Nova versão {self.new_version} disponível.\nDeseja atualizar agora?", 
-                                QMessageBox.Yes|QMessageBox.No) == QMessageBox.Yes:
+        # MUDANÇA: Criando um pop-up de atualização avançado
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Information)
+        msg.setWindowTitle("Atualização Encontrada")
+        msg.setText(f"Uma nova versão ({self.new_version}) está disponível!")
+        msg.setInformativeText("O sistema será atualizado e reiniciado.\nDeseja instalar a atualização agora?")
+        
+        # O botão nativo de "Mostrar Detalhes" para exibir o changelog
+        msg.setDetailedText(f"O que mudou nesta versão:\n\n{self.release_notes}")
+        
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.button(QMessageBox.Yes).setText("Sim, Atualizar")
+        msg.button(QMessageBox.No).setText("Agora Não")
+
+        if msg.exec() == QMessageBox.Yes:
             self.show()
             self.temp_file = "update_temp.exe" if self.is_windows else "update_temp"
             self.worker = UpdateWorker(self.download_url, self.temp_file)
