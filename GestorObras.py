@@ -7,6 +7,7 @@ import csv
 import requests
 import subprocess
 import time
+import webbrowser
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                                QTabWidget, QTableWidget, QTableWidgetItem, 
@@ -18,8 +19,61 @@ from PySide6.QtCore import Qt, QDate, QSettings, QLocale, QThread, Signal
 from PySide6.QtGui import QIcon, QFont, QAction, QColor
 
 # --- CONFIGURAÇÕES DA VERSÃO ---
-APP_VERSION = "1.0.3" 
+APP_VERSION = "1.1.0" 
 GITHUB_REPO = "Miizaa/Gestor-Obra" 
+
+# --- TEMAS DA APLICAÇÃO ---
+THEME_LIGHT = """
+    QWidget { background-color: #F5F5F5; color: #333333; font-family: "Segoe UI", "Noto Sans", sans-serif; }
+    QGroupBox { border: 1px solid #CCCCCC; border-radius: 5px; margin-top: 10px; font-weight: bold; }
+    QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px 0 3px; }
+    
+    /* Campos de input */
+    QLineEdit, QComboBox, QDateEdit, QDoubleSpinBox { background-color: #FFFFFF; border: 1px solid #CCCCCC; border-radius: 3px; padding: 5px; }
+    QDateEdit, QComboBox { padding-right: 20px; min-width: 105px; } 
+    
+    /* Remove os botões de aumentar/diminuir números */
+    QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 0px; border: none; }
+    
+    QPushButton { background-color: #E0E0E0; border: 1px solid #BDBDBD; border-radius: 4px; padding: 6px; font-weight: bold; }
+    QPushButton:hover { background-color: #D6D6D6; }
+    QTableWidget { background-color: #FFFFFF; alternate-background-color: #F9F9F9; gridline-color: #DDDDDD; }
+    QHeaderView::section { background-color: #E0E0E0; padding: 4px; border: 1px solid #CCCCCC; font-weight: bold; }
+    QListWidget { background-color: #FFFFFF; border: 1px solid #CCCCCC; }
+    QTextEdit { background-color: #FFFFFF; border: 1px solid #CCCCCC; }
+
+    /* Estilo das Abas (Tabs) */
+    QTabWidget::pane { border: 1px solid #CCCCCC; background: #F5F5F5; top: -1px; }
+    QTabBar::tab { background: #E0E0E0; border: 1px solid #CCCCCC; padding: 8px 15px; margin-right: 2px; border-top-left-radius: 4px; border-top-right-radius: 4px; }
+    QTabBar::tab:selected { background: #FFFFFF; border-bottom-color: #FFFFFF; font-weight: bold; color: #1565C0; }
+    QTabBar::tab:hover:!selected { background: #D6D6D6; }
+"""
+
+THEME_DARK = """
+    QWidget { background-color: #2B2B2B; color: #F0F0F0; font-family: "Segoe UI", "Noto Sans", sans-serif; }
+    QGroupBox { border: 1px solid #555555; border-radius: 5px; margin-top: 10px; font-weight: bold; }
+    QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px 0 3px; color: #4CAF50; }
+    
+    /* Campos de input */
+    QLineEdit, QComboBox, QDateEdit, QDoubleSpinBox { background-color: #3C3C3C; border: 1px solid #555555; border-radius: 3px; padding: 5px; color: #FFFFFF; }
+    QDateEdit, QComboBox { padding-right: 20px; min-width: 105px; } 
+    
+    /* Remove os botões de aumentar/diminuir números */
+    QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 0px; border: none; }
+    
+    QPushButton { background-color: #444444; border: 1px solid #666666; border-radius: 4px; padding: 6px; font-weight: bold; color: #FFFFFF;}
+    QPushButton:hover { background-color: #555555; }
+    QTableWidget { background-color: #333333; alternate-background-color: #3A3A3A; gridline-color: #555555; color: #FFFFFF; }
+    QHeaderView::section { background-color: #444444; padding: 4px; border: 1px solid #555555; font-weight: bold; color: #FFFFFF; }
+    QListWidget { background-color: #3C3C3C; border: 1px solid #555555; color: #FFFFFF; }
+    QTextEdit { background-color: #3C3C3C; border: 1px solid #555555; color: #FFFFFF; }
+
+    /* Estilo das Abas (Tabs) */
+    QTabWidget::pane { border: 1px solid #555555; background: #2B2B2B; top: -1px; }
+    QTabBar::tab { background: #444444; border: 1px solid #555555; padding: 8px 15px; margin-right: 2px; border-top-left-radius: 4px; border-top-right-radius: 4px; color: #FFFFFF; }
+    QTabBar::tab:selected { background: #2B2B2B; border-bottom-color: #2B2B2B; font-weight: bold; color: #4CAF50; }
+    QTabBar::tab:hover:!selected { background: #555555; }
+"""
 
 # --- UTILITÁRIO DE CAMINHO ---
 def resource_path(relative_path):
@@ -67,6 +121,7 @@ class AutoUpdater(QDialog):
         self.setLayout(self.layout)
         self.download_url = ""
         self.new_version = ""
+        self.is_windows = sys.platform == "win32"
 
     def check_updates(self):
         try:
@@ -78,12 +133,17 @@ class AutoUpdater(QDialog):
                 if tag_name != APP_VERSION:
                     assets = data.get("assets", [])
                     for asset in assets:
-                        if asset["name"].endswith(".exe"):
+                        nome_arquivo = asset["name"].lower()
+                        if self.is_windows and nome_arquivo.endswith(".exe"):
+                            self.download_url = asset["browser_download_url"]
+                            self.new_version = tag_name
+                            return True
+                        elif not self.is_windows and "linux" in nome_arquivo:
                             self.download_url = asset["browser_download_url"]
                             self.new_version = tag_name
                             return True
             return False
-        except Exception:
+        except:
             return False
 
     def start_update(self):
@@ -93,7 +153,8 @@ class AutoUpdater(QDialog):
         if QMessageBox.question(None, "Atualização", f"Nova versão {self.new_version} disponível.\nDeseja atualizar agora?", 
                                 QMessageBox.Yes|QMessageBox.No) == QMessageBox.Yes:
             self.show()
-            self.worker = UpdateWorker(self.download_url, "update_temp.exe")
+            self.temp_file = "update_temp.exe" if self.is_windows else "update_temp"
+            self.worker = UpdateWorker(self.download_url, self.temp_file)
             self.worker.progress.connect(self.bar.setValue)
             self.worker.finished.connect(self.apply_update)
             self.worker.start()
@@ -102,31 +163,33 @@ class AutoUpdater(QDialog):
         self.lbl.setText("Preparando para reiniciar...")
         nome_atual = os.path.basename(sys.executable)
         
-        bat_script = f"""
-@echo off
+        try:
+            if self.is_windows:
+                bat_script = f"""@echo off
 title Atualizando Sistema...
-echo Aguardando o fechamento do programa...
 timeout /t 2 /nobreak > NUL
-
 :loop
 del "{nome_atual}"
-if exist "{nome_atual}" (
-    echo Arquivo ainda em uso. Tentando novamente em 1 segundo...
-    timeout /t 1 /nobreak > NUL
-    goto loop
-)
-
-echo Atualizando...
-ren "update_temp.exe" "{nome_atual}"
-echo Iniciando nova versao...
+if exist "{nome_atual}" ( timeout /t 1 /nobreak > NUL & goto loop )
+ren "{self.temp_file}" "{nome_atual}"
 start "" "{nome_atual}"
 del "%~f0"
-        """
-        
-        try:
-            with open("updater.bat", "w") as f:
-                f.write(bat_script)
-            subprocess.Popen("updater.bat", shell=True)
+"""
+                with open("updater.bat", "w") as f: f.write(bat_script)
+                subprocess.Popen("updater.bat", shell=True)
+            else:
+                sh_script = f"""#!/bin/bash
+sleep 2
+rm "{nome_atual}"
+mv "{self.temp_file}" "{nome_atual}"
+chmod +x "{nome_atual}"
+"./{nome_atual}" &
+rm "$0"
+"""
+                with open("updater.sh", "w") as f: f.write(sh_script)
+                os.chmod("updater.sh", 0o755)
+                subprocess.Popen("./updater.sh", shell=True)
+                
             QApplication.quit()
             sys.exit(0)
         except Exception as e:
@@ -266,6 +329,10 @@ class Database:
         if not self.check_column_exists("financeiro", "nota_fiscal"):
             self.cursor.execute("ALTER TABLE financeiro ADD COLUMN nota_fiscal TEXT")
         
+        # MUDANÇA NOVA: QUANTIDADE NO FINANCEIRO
+        if not self.check_column_exists("financeiro", "quantidade"):
+            self.cursor.execute("ALTER TABLE financeiro ADD COLUMN quantidade REAL DEFAULT 1.0")
+        
         if not self.check_column_exists("estoque", "alerta_qtd"):
             self.cursor.execute("ALTER TABLE estoque ADD COLUMN alerta_qtd REAL DEFAULT 5.0")
         if not self.check_column_exists("estoque", "alerta_on"):
@@ -293,10 +360,8 @@ class Database:
             self.cursor.execute("""
                 INSERT INTO funcionarios (obra_id, nome, funcao, data_admissao, telefone, cpf, rg, banco, agencia, conta, valor_diaria, ativo) 
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,1)""", (obra_id, nome, funcao, admissao, tel, cpf, rg, banco, agencia, conta, diaria))
-            self.conn.commit()
-            return True
-        except Exception:
-            return False
+            self.conn.commit(); return True
+        except: return False
 
     def update_funcionario(self, fid, nome, funcao, admissao, tel, cpf, rg, banco, agencia, conta, diaria):
         try:
@@ -304,10 +369,8 @@ class Database:
                 UPDATE funcionarios 
                 SET nome=?, funcao=?, data_admissao=?, telefone=?, cpf=?, rg=?, banco=?, agencia=?, conta=?, valor_diaria=? 
                 WHERE id=?""", (nome, funcao, admissao, tel, cpf, rg, banco, agencia, conta, diaria, fid))
-            self.conn.commit()
-            return True
-        except Exception:
-            return False
+            self.conn.commit(); return True
+        except: return False
 
     def toggle_ativo_funcionario(self, fid, status, motivo=""):
         data_hoje = QDate.currentDate().toString("yyyy-MM-dd")
@@ -317,8 +380,7 @@ class Database:
                                 (fid, data_hoje, status, motivo))
             self.conn.commit()
             return True
-        except Exception:
-            return False
+        except: return False
 
     def get_historico_funcionario(self, fid):
         self.cursor.execute("SELECT data, novo_status, motivo FROM historico_status WHERE func_id=? ORDER BY data DESC, id DESC", (fid,))
@@ -432,11 +494,8 @@ class Database:
         try:
             self.cursor.execute("UPDATE estoque SET quantidade = quantidade + ? WHERE id = ?", (qtd * fator_reverso, item_id))
             self.cursor.execute("DELETE FROM movimentacoes WHERE id = ?", (mov_id,))
-            self.conn.commit()
-            return True
-        except Exception:
-            self.conn.rollback()
-            return False
+            self.conn.commit(); return True
+        except: self.conn.rollback(); return False
 
     # --- MÉTODOS DIÁRIO DE OBRA ---
     def save_diario(self, obra_id, data, clima, ativ, ocor):
@@ -453,12 +512,12 @@ class Database:
         return self.cursor.fetchone()
 
     # --- MÉTODOS FINANCEIRO ---
-    def add_financeiro(self, obra_id, data, tipo, valor, desc, nf):
-        self.cursor.execute("INSERT INTO financeiro (obra_id, data, tipo, valor, descricao, nota_fiscal) VALUES (?,?,?,?,?,?)", (obra_id, data, tipo, valor, desc, nf))
+    def add_financeiro(self, obra_id, data, tipo, valor, quantidade, desc, nf):
+        self.cursor.execute("INSERT INTO financeiro (obra_id, data, tipo, valor, quantidade, descricao, nota_fiscal) VALUES (?,?,?,?,?,?,?)", (obra_id, data, tipo, valor, quantidade, desc, nf))
         self.conn.commit()
     
     def get_financeiro(self, obra_id):
-        self.cursor.execute("SELECT id, data, tipo, valor, descricao, nota_fiscal FROM financeiro WHERE obra_id=? ORDER BY data DESC, id DESC", (obra_id,))
+        self.cursor.execute("SELECT id, data, tipo, valor, quantidade, descricao, nota_fiscal FROM financeiro WHERE obra_id=? ORDER BY data DESC, id DESC", (obra_id,))
         return self.cursor.fetchall()
     
     def delete_financeiro(self, fin_id):
@@ -529,14 +588,14 @@ class ProjectSelector(QDialog):
     def setup_ui(self):
         layout = QVBoxLayout()
         lbl_title = QLabel("🚧 Minhas Obras")
-        lbl_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #333;")
+        lbl_title.setStyleSheet("font-size: 20px; font-weight: bold;")
         layout.addWidget(lbl_title)
         self.list_obras = QListWidget()
         self.list_obras.setStyleSheet("font-size: 14px; padding: 5px;")
         self.list_obras.itemDoubleClicked.connect(self.abrir_obra)
         layout.addWidget(self.list_obras)
         btn_open = QPushButton("Abrir Obra Selecionada")
-        btn_open.setStyleSheet("background-color: #4CAF50; color: white; padding: 10px; font-weight: bold;")
+        btn_open.setStyleSheet("background-color: #4CAF50; color: white; padding: 10px; font-weight: bold; border:none;")
         btn_open.clicked.connect(self.abrir_obra)
         layout.addWidget(btn_open)
         line = QFrame(); line.setFrameShape(QFrame.HLine); line.setFrameShadow(QFrame.Sunken); layout.addWidget(line)
@@ -600,7 +659,7 @@ class InactiveEmployeesDialog(QDialog):
         self.tb.setSelectionBehavior(QAbstractItemView.SelectRows); self.tb.setEditTriggers(QAbstractItemView.NoEditTriggers)
         layout.addWidget(self.tb)
         btn_reactivate = QPushButton("♻️ Reativar Funcionário Selecionado")
-        btn_reactivate.setStyleSheet("background-color: #2196F3; color: white; padding: 10px; font-weight: bold;")
+        btn_reactivate.setStyleSheet("background-color: #2196F3; color: white; padding: 10px; font-weight: bold; border:none;")
         btn_reactivate.clicked.connect(self.reactivate); layout.addWidget(btn_reactivate); self.setLayout(layout); self.load_data()
 
     def load_data(self):
@@ -651,7 +710,8 @@ class EditMaterialDialog(QDialog):
         l.addLayout(g)
         l.addWidget(self.chk_alerta)
         
-        btn_save = QPushButton("Salvar Alterações"); btn_save.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 8px;"); btn_save.clicked.connect(self.save)
+        btn_save = QPushButton("Salvar Alterações"); btn_save.setStyleSheet("background-color: #4CAF50; color: white; border:none;")
+        btn_save.clicked.connect(self.save)
         l.addWidget(btn_save); self.setLayout(l)
 
     def load_data(self):
@@ -680,49 +740,41 @@ class DashboardTab(QWidget):
     
     def setup_ui(self):
         main_layout = QVBoxLayout()
-        # CABEÇALHO
+        
         h_header_container = QWidget()
-        h_header_container.setStyleSheet("background-color: #333333; border-radius: 5px; padding: 5px;")
         h_header = QHBoxLayout(h_header_container)
-        title = QLabel("📊 Visão Geral da Obra"); title.setStyleSheet("font-size: 22px; font-weight: bold; color: #FFFFFF;")
-        btn_refresh = QPushButton("🔄 Atualizar"); btn_refresh.setStyleSheet("background-color: #555; color: white; border: 1px solid #777; padding: 5px;")
+        title = QLabel("📊 Visão Geral da Obra"); title.setStyleSheet("font-size: 22px; font-weight: bold;")
+        btn_refresh = QPushButton("🔄 Atualizar")
         btn_refresh.clicked.connect(self.load_data)
         h_header.addWidget(title); h_header.addStretch(); h_header.addWidget(btn_refresh)
         main_layout.addWidget(h_header_container)
         
-        # CARDS (LINHA 1)
         cards_layout = QHBoxLayout()
-        self.card_saldo = self.create_card("Saldo Caixa", "R$ 0,00", "#E3F2FD", "#1565C0")
-        self.card_func = self.create_card("Presentes Hoje", "0", "#E8F5E9", "#2E7D32")
-        self.card_clima = self.create_card("Clima", "--", "#FFF3E0", "#EF6C00")
+        self.card_saldo = self.create_card("Saldo Caixa", "R$ 0,00", "#4CAF50")
+        self.card_func = self.create_card("Presentes Hoje", "0", "#2196F3")
+        self.card_clima = self.create_card("Clima", "--", "#FF9800")
         cards_layout.addWidget(self.card_saldo); cards_layout.addWidget(self.card_func); cards_layout.addWidget(self.card_clima)
         main_layout.addLayout(cards_layout)
         
-        # LISTAS (LINHA 2)
         h_lists = QHBoxLayout()
         gb_emp = QGroupBox("👷 Funcionários Presentes")
         self.list_presentes = QListWidget()
-        self.list_presentes.setStyleSheet("border: 1px solid #555; background-color: #424242; color: #FFF;") 
         v_emp = QVBoxLayout(); v_emp.addWidget(self.list_presentes); gb_emp.setLayout(v_emp)
         
         gb_stock = QGroupBox("⚠️ Estoque Baixo")
         self.list_alert = QListWidget()
-        self.list_alert.setStyleSheet("border: 1px solid #555; background-color: #424242; color: #FFEB3B;") 
         v_stock = QVBoxLayout(); v_stock.addWidget(self.list_alert); gb_stock.setLayout(v_stock)
         
         h_lists.addWidget(gb_emp); h_lists.addWidget(gb_stock)
         main_layout.addLayout(h_lists)
         
-        # DIÁRIO (LINHA 3 - ReadOnly - AGORA ESCURO)
         h_diary = QHBoxLayout()
         gb_ativ = QGroupBox("🔨 Atividades do Dia")
         self.txt_ativ = QTextEdit(); self.txt_ativ.setReadOnly(True)
-        self.txt_ativ.setStyleSheet("border: 1px solid #555; background-color: #424242; color: #FFF;") 
         v_ativ = QVBoxLayout(); v_ativ.addWidget(self.txt_ativ); gb_ativ.setLayout(v_ativ)
         
         gb_ocor = QGroupBox("⚠️ Ocorrências / Imprevistos")
         self.txt_ocor = QTextEdit(); self.txt_ocor.setReadOnly(True)
-        self.txt_ocor.setStyleSheet("border: 1px solid #555; background-color: #424242; color: #FFF;") 
         v_ocor = QVBoxLayout(); v_ocor.addWidget(self.txt_ocor); gb_ocor.setLayout(v_ocor)
         
         h_diary.addWidget(gb_ativ); h_diary.addWidget(gb_ocor)
@@ -730,10 +782,10 @@ class DashboardTab(QWidget):
         
         self.setLayout(main_layout); self.load_data()
         
-    def create_card(self, title, val, bg, color):
-        frame = QFrame(); frame.setStyleSheet(f"background-color: {bg}; border-radius: 10px; border: 1px solid {color};")
-        l = QVBoxLayout(); l1 = QLabel(title); l1.setStyleSheet(f"color: {color}; font-size: 14px;")
-        l2 = QLabel(val); l2.setStyleSheet(f"color: {color}; font-size: 24px; font-weight: bold;"); l2.setObjectName("v")
+    def create_card(self, title, val, color):
+        frame = QFrame(); frame.setStyleSheet(f"border-radius: 10px; border: 2px solid {color};")
+        l = QVBoxLayout(); l1 = QLabel(title); l1.setStyleSheet(f"color: {color}; font-size: 14px; border: none;")
+        l2 = QLabel(val); l2.setStyleSheet(f"color: {color}; font-size: 24px; font-weight: bold; border: none;"); l2.setObjectName("v")
         l.addWidget(l1); l.addWidget(l2); frame.setLayout(l); return frame
     
     def update_card(self, card, val):
@@ -801,7 +853,7 @@ class EmployeeManager(QWidget):
         bt_clear = QPushButton("Limpar")
         bt_clear.clicked.connect(self.rst)
         self.bt_del = QPushButton("❌ Desativar")
-        self.bt_del.setStyleSheet("background-color: #F44336; color: white;")
+        self.bt_del.setStyleSheet("background-color: #F44336; color: white; border:none;")
         self.bt_del.clicked.connect(self.desativar)
         self.bt_del.setVisible(False)
         btn_hist = QPushButton("📜 Ver Histórico")
@@ -839,7 +891,7 @@ class EmployeeManager(QWidget):
         self.tb.setColumnWidth(11, 60)
         
         bp = QPushButton("💾 Salvar Presença")
-        bp.setStyleSheet("background-color:#4CAF50;color:white;font-weight:bold")
+        bp.setStyleSheet("background-color:#4CAF50;color:white; border:none;")
         bp.clicked.connect(self.svp)
         
         layout.addWidget(gb)
@@ -946,12 +998,12 @@ class StockControl(QWidget):
         lw = QWidget()
         ll = QVBoxLayout()
         ll.addWidget(QLabel("📦 Saldo da Obra"))
-        self.tb_s = QTableWidget(0,4)
-        self.tb_s.setHorizontalHeaderLabels(["ID", "Item", "Categoria", "Qtd"])
+        self.tb_s = QTableWidget(0,4); self.tb_s.setHorizontalHeaderLabels(["ID", "Item", "Categoria", "Quantidade"])
         self.tb_s.setColumnHidden(0,True)
-        self.tb_s.horizontalHeader().setSectionResizeMode(1,QHeaderView.Stretch)
-        self.tb_s.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.tb_s.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tb_s.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.tb_s.horizontalHeader().setStretchLastSection(True)
+        self.tb_s.setColumnWidth(1, 200)
+        self.tb_s.setSelectionBehavior(QAbstractItemView.SelectRows); self.tb_s.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.tb_s.cellClicked.connect(self.sel)
         
         h_btns_stock = QHBoxLayout()
@@ -978,7 +1030,7 @@ class StockControl(QWidget):
         btn_filter = QPushButton("🔍 Filtrar")
         btn_filter.clicked.connect(self.load_history)
         btn_del = QPushButton("🗑️ Excluir Mov.")
-        btn_del.setStyleSheet("background-color: #F44336; color: white;")
+        btn_del.setStyleSheet("background-color: #F44336; color: white; border:none;")
         btn_del.clicked.connect(self.delete_move)
         
         self.f_item.textChanged.connect(self.load_history)
@@ -1000,11 +1052,12 @@ class StockControl(QWidget):
         ll.addLayout(h_hist_btns)
         
         self.tb_h = QTableWidget(0,9) 
-        self.tb_h.setHorizontalHeaderLabels(["ID","Data","Item","Categoria","Tipo","Qtd","Origem","Destino", "NF"])
+        self.tb_h.setHorizontalHeaderLabels(["ID","Data","Item","Categoria","Tipo","Quantidade","Origem","Destino", "NF"])
         self.tb_h.setColumnHidden(0,True)
         self.tb_h.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.tb_h.horizontalHeader().setStretchLastSection(True) 
         self.tb_h.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tb_h.cellDoubleClicked.connect(self.abrir_nf_navegador)
         ll.addWidget(self.tb_h)
         lw.setLayout(ll)
         
@@ -1033,13 +1086,13 @@ class StockControl(QWidget):
         gb2 = QGroupBox("Movimentação")
         gl2 = QVBoxLayout()
         self.lb_s = QLabel("Selecione...")
-        self.lb_s.setStyleSheet("color:red")
+        self.lb_s.setStyleSheet("color:red; font-weight:bold;")
         self.dt = QDateEdit()
         self.dt.setCalendarPopup(True)
         self.dt.setDate(QDate.currentDate())
         self.dt.setDisplayFormat("dd/MM/yyyy")
         self.in_q = QLineEdit()
-        self.in_q.setPlaceholderText("Qtd")
+        self.in_q.setPlaceholderText("Quantidade")
         self.in_origem = QLineEdit()
         self.in_origem.setPlaceholderText("Origem")
         self.in_dest = QLineEdit()
@@ -1077,8 +1130,14 @@ class StockControl(QWidget):
     def save_table_state(self):
         QSettings("MiizaSoft", "GestorObras").setValue("stock_bal_state", self.tb_s.horizontalHeader().saveState())
     def load_table_state(self):
-        if v := QSettings("MiizaSoft", "GestorObras").value("stock_bal_state"): self.tb_s.horizontalHeader().restoreState(v)
-        if v := QSettings("MiizaSoft", "GestorObras").value("stock_hist_state"): self.tb_h.horizontalHeader().restoreState(v)
+        if v := QSettings("MiizaSoft", "GestorObras").value("stock_bal_state"): 
+            self.tb_s.horizontalHeader().restoreState(v)
+        if v := QSettings("MiizaSoft", "GestorObras").value("stock_hist_state"): 
+            self.tb_h.horizontalHeader().restoreState(v)
+            
+        # FORÇANDO A INTERATIVIDADE APÓS CARREGAR AS MEMÓRIAS
+        self.tb_s.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.tb_h.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
 
     def add(self):
         if self.in_i.text(): 
@@ -1087,11 +1146,11 @@ class StockControl(QWidget):
             self.ref()
             
     def sel(self, r, c): 
-        try:
+        try: 
             self.sid = int(self.tb_s.item(r,0).text())
             self.lb_s.setText(self.tb_s.item(r,1).text())
-            self.lb_s.setStyleSheet("color:green")
-        except Exception:
+            self.lb_s.setStyleSheet("color:#4CAF50; font-weight:bold;")
+        except: 
             pass
             
     def mov(self, t):
@@ -1124,7 +1183,7 @@ class StockControl(QWidget):
     def ref(self):
         self.sid = None
         self.lb_s.setText("Selecione...")
-        self.lb_s.setStyleSheet("color:red")
+        self.lb_s.setStyleSheet("color:red; font-weight:bold;")
         est = self.db.get_estoque(self.obra_id)
         self.tb_s.setRowCount(0)
         for r,d in enumerate(est):
@@ -1153,11 +1212,11 @@ class StockControl(QWidget):
             
             tipo_val = d[4]
             if tipo_val == "entrada":
-                tipo_item = QTableWidgetItem("Entrada"); tipo_item.setForeground(Qt.darkGreen)
+                tipo_item = QTableWidgetItem("Entrada"); tipo_item.setForeground(QColor("#4CAF50"))
             elif tipo_val == "saida":
-                tipo_item = QTableWidgetItem("Saída"); tipo_item.setForeground(Qt.red)
+                tipo_item = QTableWidgetItem("Saída"); tipo_item.setForeground(QColor("#F44336"))
             else:
-                tipo_item = QTableWidgetItem("Uso Interno"); tipo_item.setForeground(QColor("#F57C00")) 
+                tipo_item = QTableWidgetItem("Uso Interno"); tipo_item.setForeground(QColor("#FF9800")) 
             
             self.tb_h.setItem(r,4, tipo_item)
             self.tb_h.setItem(r,5,QTableWidgetItem(f"{d[5]} {d[6]}"))
@@ -1186,6 +1245,26 @@ class StockControl(QWidget):
 
     def export_saldo(self): self.export_csv(self.tb_s, "saldo_estoque")
     def export_historico(self): self.export_csv(self.tb_h, "historico_estoque")
+    # ABRIR O SITE DA FAZENDA PARA CONSULTAR A NOTA FISCAL:
+    def abrir_nf_navegador(self, r, c):
+        if c == 8: # A coluna 8 é a da Nota Fiscal no Histórico
+            item = self.tb_h.item(r, c)
+            if item and item.text().strip():
+                nf_texto = item.text().strip()
+                # Extrai apenas os números (remove espaços, pontos, etc)
+                chave = ''.join(filter(str.isdigit, nf_texto)) 
+                
+                if chave:
+                    resposta = QMessageBox.question(self, "Consultar Nota Fiscal", 
+                                                    f"Deseja abrir a Nota Fiscal no navegador?\n\nChave: {nf_texto}", 
+                                                    QMessageBox.Yes | QMessageBox.No)
+                    if resposta == QMessageBox.Yes:
+                        # Copia a chave para a área de transferência
+                        QApplication.clipboard().setText(chave)
+                        # Link oficial do Portal Nacional da NF-e
+                        url = f"https://www.nfe.fazenda.gov.br/portal/consultaRecaptcha.aspx?tipoConsulta=resumo&mNFe={chave}"
+                        webbrowser.open(url)
+                        QMessageBox.information(self, "Copiado", "A chave foi copiada para sua área de transferência!\n\nBasta colar (Ctrl+V) no site da Fazenda se for solicitado no Captcha.")
 
 # --- 9. ABA: RELATÓRIOS ---
 class ReportTab(QWidget):
@@ -1226,7 +1305,7 @@ class ReportTab(QWidget):
         l.addWidget(self.t)
         
         self.lbl_total_folha = QLabel("Total Geral da Folha: R$ 0,00")
-        self.lbl_total_folha.setStyleSheet("font-size: 16px; font-weight: bold; color: #333; margin-top: 5px;")
+        self.lbl_total_folha.setStyleSheet("font-size: 16px; font-weight: bold; margin-top: 5px;")
         l.addWidget(self.lbl_total_folha)
         
         self.setLayout(l)
@@ -1265,7 +1344,7 @@ class ReportTab(QWidget):
             
             self.t.setItem(r, 10, QTableWidgetItem(f"R$ {valor_diaria:.2f}"))
             item_total = QTableWidgetItem(f"R$ {total_pagar:.2f}")
-            item_total.setForeground(Qt.darkGreen)
+            item_total.setForeground(QColor("#4CAF50"))
             item_total.setFont(QFont("Arial", 9, QFont.Bold))
             self.t.setItem(r, 11, item_total)
 
@@ -1296,14 +1375,14 @@ class MaterialCalculator(QWidget):
         g.addWidget(QLabel("Parede (LxA):"),0,0); g.addWidget(self.w,0,1); g.addWidget(self.h,0,2); g.addWidget(self.u_w, 0, 3)
         g.addWidget(QLabel("Tijolo (LxA):"),1,0); g.addWidget(self.bh,1,1); g.addWidget(self.bl,1,2); g.addWidget(self.u_b, 1, 3)
         b=QPushButton("Calcular"); b.clicked.connect(self.ca); self.ra=QLabel("Aguardando cálculo...")
-        self.ra.setStyleSheet("font-weight: bold; color: #f2ff00; font-size: 14px; background-color: #333; padding: 5px; border-radius: 4px;") 
+        self.ra.setStyleSheet("font-weight: bold; color: #FF9800; font-size: 14px; padding: 5px;") 
         g.addWidget(b,2,0,1,4); g.addWidget(self.ra,3,0,1,4)
         gb1.setLayout(g)
         
         gb2 = QGroupBox("Cálculo de Concreto (Traço)"); g2 = QGridLayout()
-        self.sp_c = QDoubleSpinBox(); self.sp_c.setValue(1.0); self.sp_c.setPrefix("Cim: ")
-        self.sp_a = QDoubleSpinBox(); self.sp_a.setValue(2.0); self.sp_a.setPrefix("Are: ")
-        self.sp_b = QDoubleSpinBox(); self.sp_b.setValue(3.0); self.sp_b.setPrefix("Bri: ")
+        self.sp_c = QDoubleSpinBox(); self.sp_c.setValue(1.0); self.sp_c.setPrefix("Cimento: ")
+        self.sp_a = QDoubleSpinBox(); self.sp_a.setValue(2.0); self.sp_a.setPrefix("Areia: ")
+        self.sp_b = QDoubleSpinBox(); self.sp_b.setValue(3.0); self.sp_b.setPrefix("Brita: ")
         h_traco = QHBoxLayout(); h_traco.addWidget(self.sp_c); h_traco.addWidget(self.sp_a); h_traco.addWidget(self.sp_b)
         g2.addWidget(QLabel("Traço (C:A:B):"), 0, 0); g2.addLayout(h_traco, 0, 1, 1, 2)
         self.conc_comp = QLineEdit(); self.uc_comp = QComboBox(); self.uc_comp.addItems(["m", "cm"])
@@ -1314,7 +1393,7 @@ class MaterialCalculator(QWidget):
         g2.addWidget(QLabel("Espessura:"), 3, 0); g2.addWidget(self.conc_esp, 3, 1); g2.addWidget(self.uc_esp, 3, 2)
         btn_calc_conc = QPushButton("Calcular Concreto"); btn_calc_conc.clicked.connect(self.cc)
         self.res_conc = QLabel("Aguardando cálculo...")
-        self.res_conc.setStyleSheet("font-weight: bold; color: #f2ff00; font-size: 14px; background-color: #333; padding: 5px; border-radius: 4px;") 
+        self.res_conc.setStyleSheet("font-weight: bold; color: #FF9800; font-size: 14px; padding: 5px;") 
         lay_conc_inner = QVBoxLayout(); lay_conc_inner.addLayout(g2); lay_conc_inner.addWidget(btn_calc_conc); lay_conc_inner.addWidget(self.res_conc)
         gb2.setLayout(lay_conc_inner)
         l.addWidget(gb1); l.addWidget(gb2); l.addStretch(); self.setLayout(l)
@@ -1322,12 +1401,12 @@ class MaterialCalculator(QWidget):
     def get_val_in_meters(self, val_text, unit):
         try:
             val = float(val_text.replace(',', '.'))
-            return val / 100 if unit == "cm" else val
-        except Exception:
-            return 0.0
+            if unit == "cm": return val / 100
+            return val
+        except: return 0.0
 
     def ca(self):
-        try:
+        try: 
             w = self.get_val_in_meters(self.w.text(), self.u_w.currentText())
             h = self.get_val_in_meters(self.h.text(), self.u_w.currentText())
             bw = self.get_val_in_meters(self.bh.text(), self.u_b.currentText())
@@ -1335,8 +1414,7 @@ class MaterialCalculator(QWidget):
             if bw*bl == 0: raise ValueError
             total = (w * h) / (bw * bl)
             self.ra.setText(f"Total (+10%): {int(total * 1.1)}")
-        except Exception:
-            self.ra.setText("Erro")
+        except: self.ra.setText("Erro")
 
     def cc(self):
         try:
@@ -1345,9 +1423,7 @@ class MaterialCalculator(QWidget):
             esp = self.get_val_in_meters(self.conc_esp.text(), self.uc_esp.currentText())
             vol_m3 = comp * larg * esp
             vol_seco = vol_m3 * 1.52
-            part_c = self.sp_c.value()
-            part_a = self.sp_a.value()
-            part_b = self.sp_b.value()
+            part_c = self.sp_c.value(); part_a = self.sp_a.value(); part_b = self.sp_b.value()
             total_parts = part_c + part_a + part_b
             if total_parts == 0: raise ValueError
             vol_cimento = (part_c / total_parts) * vol_seco
@@ -1355,8 +1431,7 @@ class MaterialCalculator(QWidget):
             vol_brita = (part_b / total_parts) * vol_seco
             sacos_cimento = (vol_cimento * 1440) / 50
             self.res_conc.setText(f"Vol: {vol_m3:.2f}m³ | Cim: {sacos_cimento:.1f} sc | Areia: {vol_areia:.2f}m³ | Brita: {vol_brita:.2f}m³")
-        except Exception:
-            self.res_conc.setText("Erro: Verifique números.")
+        except: self.res_conc.setText("Erro: Verifique números.")
 
 # --- 11. ABA: DIÁRIO DE OBRA ---
 class DiaryTab(QWidget):
@@ -1376,21 +1451,16 @@ class DiaryTab(QWidget):
         l.addWidget(QLabel("🌤️ Condições Climáticas:")); l.addWidget(self.txt_clima)
         l.addWidget(QLabel("🔨 Atividades do Dia:")); l.addWidget(self.txt_ativ)
         l.addWidget(QLabel("⚠️ Ocorrências:")); l.addWidget(self.txt_ocor)
-        btn_save = QPushButton("💾 Salvar Diário"); btn_save.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 10px;")
+        btn_save = QPushButton("💾 Salvar Diário"); btn_save.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 10px; border:none;")
         btn_save.clicked.connect(self.save)
         l.addWidget(btn_save)
         self.setLayout(l); self.load_data()
     def load_data(self):
-        if data := self.db.get_diario(
-            self.obra_id, self.dt.date().toString("yyyy-MM-dd")
-        ):
-            self.txt_clima.setPlainText(data[0])
-            self.txt_ativ.setPlainText(data[1])
-            self.txt_ocor.setPlainText(data[2])
+        data = self.db.get_diario(self.obra_id, self.dt.date().toString("yyyy-MM-dd"))
+        if data:
+            self.txt_clima.setPlainText(data[0]); self.txt_ativ.setPlainText(data[1]); self.txt_ocor.setPlainText(data[2])
         else:
-            self.txt_clima.clear()
-            self.txt_ativ.clear()
-            self.txt_ocor.clear()
+            self.txt_clima.clear(); self.txt_ativ.clear(); self.txt_ocor.clear()
     def save(self):
         self.db.save_diario(self.obra_id, self.dt.date().toString("yyyy-MM-dd"), self.txt_clima.toPlainText(), self.txt_ativ.toPlainText(), self.txt_ocor.toPlainText())
         QMessageBox.information(self, "Sucesso", "Diário salvo!")
@@ -1403,13 +1473,20 @@ class FinancialTab(QWidget):
         lw = QWidget(); ll = QVBoxLayout()
         self.lbl_saldo = QLabel("Saldo: R$ 0.00"); self.lbl_saldo.setStyleSheet("font-size: 18px; font-weight: bold;")
         ll.addWidget(self.lbl_saldo)
-        self.tb = QTableWidget(0, 6); self.tb.setHorizontalHeaderLabels(["ID", "Data", "Tipo", "Valor", "Descrição", "NF"])
-        self.tb.setColumnHidden(0, True); self.tb.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        
+        self.tb = QTableWidget(0, 7)
+        self.tb.setHorizontalHeaderLabels(["ID", "Data", "Tipo", "Valor", "Quantidade", "Descrição", "NF"])
+        self.tb.setColumnHidden(0, True)
+        self.tb.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.tb.horizontalHeader().setStretchLastSection(True)
+        self.tb.setColumnWidth(5, 250) # Dá espaço para a descrição
         self.tb.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tb.cellDoubleClicked.connect(self.abrir_nf_navegador)
         ll.addWidget(self.tb)
         
         h_btns = QHBoxLayout()
-        btn_del = QPushButton("🗑️ Excluir"); btn_del.clicked.connect(self.delete_entry)
+        btn_del = QPushButton("🗑️ Excluir"); btn_del.setStyleSheet("background-color: #F44336; color: white; border:none;")
+        btn_del.clicked.connect(self.delete_entry)
         btn_exp = QPushButton("📤 Exportar Extrato"); btn_exp.clicked.connect(self.export_data)
         h_btns.addWidget(btn_del); h_btns.addWidget(btn_exp)
         ll.addLayout(h_btns); lw.setLayout(ll)
@@ -1419,6 +1496,9 @@ class FinancialTab(QWidget):
         self.dt = QDateEdit(); self.dt.setCalendarPopup(True); self.dt.setDate(QDate.currentDate()); self.dt.setDisplayFormat("dd/MM/yyyy")
         self.cb_tipo = QComboBox(); self.cb_tipo.addItems(["Saída (Gasto)", "Entrada (Recebimento)"])
         self.sp_valor = QDoubleSpinBox(); self.sp_valor.setRange(0, 1000000); self.sp_valor.setPrefix("R$ ")
+        
+        self.sp_qtd = QDoubleSpinBox(); self.sp_qtd.setRange(0.01, 1000000); self.sp_qtd.setValue(1.0); self.sp_qtd.setDecimals(2)
+        
         self.txt_nf = QLineEdit(); self.txt_nf.setPlaceholderText("Nota Fiscal")
         self.txt_desc = QLineEdit(); self.txt_desc.setPlaceholderText("Descrição (Ex: Cimento, Areia, Brita)")
         
@@ -1426,36 +1506,62 @@ class FinancialTab(QWidget):
         gl.addWidget(QLabel("Data:"),0,0); gl.addWidget(self.dt,0,1)
         gl.addWidget(QLabel("Tipo:"),1,0); gl.addWidget(self.cb_tipo,1,1)
         gl.addWidget(QLabel("Valor:"),2,0); gl.addWidget(self.sp_valor,2,1)
-        gl.addWidget(QLabel("NF:"),3,0); gl.addWidget(self.txt_nf,3,1)
-        gl.addWidget(QLabel("Desc:"),4,0); gl.addWidget(self.txt_desc,4,1)
-        gl.addWidget(btn_add,5,0,1,2); gb.setLayout(gl)
+        gl.addWidget(QLabel("Quantidade:"),3,0); gl.addWidget(self.sp_qtd,3,1)
+        gl.addWidget(QLabel("NF:"),4,0); gl.addWidget(self.txt_nf,4,1)
+        gl.addWidget(QLabel("Desc:"),5,0); gl.addWidget(self.txt_desc,5,1)
+        gl.addWidget(btn_add,6,0,1,2); gb.setLayout(gl)
         rl.addWidget(gb); rl.addStretch(); rw.setLayout(rl)
         main.addWidget(lw); main.addWidget(rw); self.setLayout(main); self.load_data()
 
     def add(self):
         tipo = "saida" if "Saída" in self.cb_tipo.currentText() else "entrada"
-        self.db.add_financeiro(self.obra_id, self.dt.date().toString("yyyy-MM-dd"), tipo, self.sp_valor.value(), self.txt_desc.text(), self.txt_nf.text())
-        self.txt_desc.clear(); self.txt_nf.clear(); self.sp_valor.setValue(0); self.load_data()
+        self.db.add_financeiro(self.obra_id, self.dt.date().toString("yyyy-MM-dd"), tipo, self.sp_valor.value(), self.sp_qtd.value(), self.txt_desc.text(), self.txt_nf.text())
+        self.txt_desc.clear(); self.txt_nf.clear(); self.sp_valor.setValue(0); self.sp_qtd.setValue(1.0); self.load_data()
 
     def load_data(self):
         rows = self.db.get_financeiro(self.obra_id)
         self.tb.setRowCount(0); saldo = 0
         for r, row in enumerate(rows):
             self.tb.insertRow(r)
+            # row = [id, data, tipo, valor, quantidade, descricao, nota_fiscal]
             self.tb.setItem(r, 0, QTableWidgetItem(str(row[0])))
             try: fmt = QDate.fromString(row[1], "yyyy-MM-dd").toString("dd/MM/yyyy")
             except: fmt = row[1]
             self.tb.setItem(r, 1, QTableWidgetItem(fmt))
             tipo_item = QTableWidgetItem(row[2].upper())
-            if row[2] == 'entrada': tipo_item.setForeground(Qt.darkGreen); saldo += row[3]
-            else: tipo_item.setForeground(Qt.red); saldo -= row[3]
+            if row[2] == 'entrada': tipo_item.setForeground(QColor("#4CAF50")); saldo += row[3]
+            else: tipo_item.setForeground(QColor("#F44336")); saldo -= row[3]
             self.tb.setItem(r, 2, tipo_item)
             self.tb.setItem(r, 3, QTableWidgetItem(f"R$ {row[3]:.2f}"))
-            self.tb.setItem(r, 4, QTableWidgetItem(row[4]))
-            self.tb.setItem(r, 5, QTableWidgetItem(row[5] or ""))
+            
+            qtd_val = row[4] if row[4] is not None else 1.0
+            # Se for inteiro (ex: 5.0), mostra 5. Se for decimal (ex: 1.5), mostra 1.5
+            qtd_str = f"{qtd_val:.2f}".rstrip('0').rstrip('.') if '.' in f"{qtd_val:.2f}" else f"{qtd_val:.2f}"
+            self.tb.setItem(r, 4, QTableWidgetItem(qtd_str))
+            
+            self.tb.setItem(r, 5, QTableWidgetItem(row[5]))
+            self.tb.setItem(r, 6, QTableWidgetItem(row[6] or ""))
+            
+        color = "#4CAF50" if saldo >= 0 else "#F44336"
         self.lbl_saldo.setText(f"Saldo: R$ {saldo:.2f}")
-        color = "green" if saldo >= 0 else "red"
         self.lbl_saldo.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {color};")
+
+    def abrir_nf_navegador(self, r, c):
+        if c == 6: # Nota fiscal agora é a coluna 6
+            item = self.tb.item(r, c)
+            if item and item.text().strip():
+                nf_texto = item.text().strip()
+                chave = ''.join(filter(str.isdigit, nf_texto))
+                
+                if chave:
+                    resposta = QMessageBox.question(self, "Consultar Nota Fiscal", 
+                                                    f"Deseja abrir a Nota Fiscal no navegador?\n\nChave: {nf_texto}", 
+                                                    QMessageBox.Yes | QMessageBox.No)
+                    if resposta == QMessageBox.Yes:
+                        QApplication.clipboard().setText(chave)
+                        url = f"https://www.nfe.fazenda.gov.br/portal/consultaRecaptcha.aspx?tipoConsulta=resumo&mNFe={chave}"
+                        webbrowser.open(url)
+                        QMessageBox.information(self, "Copiado", "A chave foi copiada para sua área de transferência!\n\nBasta colar (Ctrl+V) no site da Fazenda se for solicitado no Captcha.")
 
     def delete_entry(self):
         rows = self.tb.selectionModel().selectedRows()
@@ -1549,10 +1655,14 @@ class ConstructionApp(QMainWindow):
         self.updater = AutoUpdater(self)
         if self.updater.check_updates():
             self.updater.start_update()
+            
+        # CARREGA O TEMA SALVO
+        self.apply_theme(QSettings("MiizaSoft", "GestorObras").value("theme", "Escuro"))
 
     def setup_ui(self):
         self.setWindowTitle(f"Gestor de Obras - {self.obra_nome}")
         menu_bar = self.menuBar(); menu_bar.clear()
+        
         file_menu = menu_bar.addMenu("☰ Menu")
         action_inactives = QAction("👥 Funcionários Inativos", self); action_inactives.triggered.connect(self.open_inactives); file_menu.addAction(action_inactives)
         file_menu.addSeparator()
@@ -1560,6 +1670,15 @@ class ConstructionApp(QMainWindow):
         file_menu.addAction(action_change)
         action_exit = QAction("❌ Sair", self); action_exit.triggered.connect(self.close)
         file_menu.addAction(action_exit)
+
+        # MENU DE TEMAS
+        view_menu = menu_bar.addMenu("🎨 Aparência")
+        action_theme_light = QAction("☀️ Tema Claro", self)
+        action_theme_light.triggered.connect(lambda: self.apply_theme("Claro"))
+        view_menu.addAction(action_theme_light)
+        action_theme_dark = QAction("🌙 Tema Escuro", self)
+        action_theme_dark.triggered.connect(lambda: self.apply_theme("Escuro"))
+        view_menu.addAction(action_theme_dark)
 
         self.tabs = QTabWidget()
         
@@ -1584,6 +1703,14 @@ class ConstructionApp(QMainWindow):
         self.tabs.currentChanged.connect(self.on_tab_change)
         self.setCentralWidget(self.tabs)
 
+    def apply_theme(self, theme_name):
+        app = QApplication.instance()
+        if theme_name == "Claro":
+            app.setStyleSheet(THEME_LIGHT)
+        else:
+            app.setStyleSheet(THEME_DARK)
+        QSettings("MiizaSoft", "GestorObras").setValue("theme", theme_name)
+
     def on_tab_change(self, index):
         if index == 0: self.tab_dashboard.load_data()
 
@@ -1594,7 +1721,7 @@ class ConstructionApp(QMainWindow):
         self.status.clearMessage()
         for child in self.status.findChildren(QLabel): self.status.removeWidget(child)
         credits = QLabel(f"Obra Ativa: {self.obra_nome} | Desenvolvido por Amizael Alves | amizael@gmail.com | ©2026")
-        credits.setStyleSheet("color: #444; font-weight: bold; margin-right: 15px;")
+        credits.setStyleSheet("font-weight: bold; margin-right: 15px;")
         self.status.addPermanentWidget(credits)
 
     def trocar_obra(self):
@@ -1628,13 +1755,28 @@ class ConstructionApp(QMainWindow):
 # --- 15. EXECUÇÃO DO PROGRAMA ---
 if __name__ == "__main__":
     with contextlib.suppress(Exception):
-        myappid = 'miiza.gestor.obras.v31_2'
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        if sys.platform == "win32":
+            myappid = 'miiza.gestor.obras.v32_0'
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     
     app = QApplication(sys.argv)
     QLocale.setDefault(QLocale(QLocale.Language.Portuguese, QLocale.Country.Brazil))
+    
+    # CONFIGURAÇÃO DE FONTE PARA EMOJIS MULTIPLATAFORMA
+    default_font = app.font()
+    default_font.setFamilies([default_font.defaultFamily(), "Segoe UI Emoji", "Noto Color Emoji", "Apple Color Emoji"])
+    app.setFont(default_font)
+
     try: app.setWindowIcon(QIcon(resource_path("icone_obra.ico")))
     except: pass
+    
+    # ---> CORREÇÃO: CARREGA O TEMA AQUI, ANTES DE QUALQUER JANELA ABRIR <---
+    tema_salvo = QSettings("MiizaSoft", "GestorObras").value("theme", "Escuro")
+    if tema_salvo == "Claro":
+        app.setStyleSheet(THEME_LIGHT)
+    else:
+        app.setStyleSheet(THEME_DARK)
+    # -----------------------------------------------------------------------
     
     db = Database()
     selector = ProjectSelector(db)
