@@ -1146,11 +1146,15 @@ class StockControl(QWidget):
         self.ref()
     
     def save_table_state(self):
-        QSettings("MiizaSoft", "GestorObras").setValue("stock_bal_state", self.tb_s.horizontalHeader().saveState())
+        settings = QSettings("MiizaSoft", "GestorObras")
+        settings.setValue("stock_bal_state", self.tb_s.horizontalHeader().saveState())
+        settings.setValue("stock_hist_state", self.tb_h.horizontalHeader().saveState()) # Faltava o histórico!
+
     def load_table_state(self):
-        if v := QSettings("MiizaSoft", "GestorObras").value("stock_bal_state"): 
+        settings = QSettings("MiizaSoft", "GestorObras")
+        if v := settings.value("stock_bal_state"): 
             self.tb_s.horizontalHeader().restoreState(v)
-        if v := QSettings("MiizaSoft", "GestorObras").value("stock_hist_state"): 
+        if v := settings.value("stock_hist_state"): 
             self.tb_h.horizontalHeader().restoreState(v)
             
         # FORÇANDO A INTERATIVIDADE APÓS CARREGAR AS MEMÓRIAS
@@ -1387,7 +1391,7 @@ class MaterialCalculator(QWidget):
     def __init__(self):
         super().__init__()
         l = QVBoxLayout()
-        gb1 = QGroupBox("Alvenaria"); g = QGridLayout()
+        gb1 = QGroupBox("Cálculo de Alvenaria"); g = QGridLayout()
         self.w = QLineEdit(); self.h = QLineEdit(); self.u_w = QComboBox(); self.u_w.addItems(["m", "cm"])
         self.bh = QLineEdit(); self.bl = QLineEdit(); self.u_b = QComboBox(); self.u_b.addItems(["cm", "m"])
         g.addWidget(QLabel("Parede (LxA):"),0,0); g.addWidget(self.w,0,1); g.addWidget(self.h,0,2); g.addWidget(self.u_w, 0, 3)
